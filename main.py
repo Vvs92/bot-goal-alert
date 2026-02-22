@@ -3,6 +3,7 @@ import logging
 import os
 import asyncio
 import sys
+import time
 from telegram import Bot
 
 SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_TOKEN", "")
@@ -10,9 +11,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 print("DEMARRAGE BOT", flush=True)
-print("TOKEN SM: " + str(bool(SPORTMONKS_TOKEN)), flush=True)
-print("TOKEN TG: " + str(bool(TELEGRAM_TOKEN)), flush=True)
-print("CHAT ID: " + str(bool(TELEGRAM_CHAT_ID)), flush=True)
 
 LEAGUES = {
     2: "Champions League",
@@ -29,22 +27,13 @@ LEAGUES = {
     955: "Saudi Pro League"
 }
 
-THRESHOLD = 65
+THRESHOLD = 40
 INTERVAL = 90
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream=sys.stdout)
 
 URL = "https://api.sportmonks.com/v3/football"
 alerts = {}
-
-# Codes corrects SportMonks (confirmes par le debug)
-STAT_SHOTS_ON = "shots-on-target"
-STAT_SHOTS_TOTAL = "shots-total"
-STAT_SHOTS_BOX = "shots-insidebox"
-STAT_CORNERS = "corners"
-STAT_DANGEROUS = "dangerous-attacks"
-STAT_XG = "expected-goals"
-STAT_ATTACKS = "attacks"
 
 
 def get_fixtures():
@@ -101,26 +90,14 @@ def get_goals(fixture, home=True):
 
 def get_minute(fixture):
     try:
-        state = fixture.get("state", {})
-        if isinstance(state, dict):
-            # Format confirme: {'id': 2, 'state': 'INPLAY_1ST_HALF', ...}
-            # La minute n'est pas dans state directement - on cherche dans details
-            details = fixture.get("details", {})
-            if isinstance(details, dict):
-                mm = details.get("minute", 0)
-                if mm:
-                    return int(mm)
-            # Fallback: cherche dans length ou autres champs
-            length = fixture.get("length", 0)
-            starting = fixture.get("starting_at_timestamp", 0)
-            if starting:
-                import time
-                elapsed = int((time.time() - starting) / 60)
-                if 0 < elapsed < 120:
-                    return elapsed
+        starting = fixture.get("starting_at_timestamp", 0)
+        if starting:
+            elapsed = int((time.time() - starting) / 60)
+            if 0 < elapsed < 120:
+                return elapsed
     except Exception:
         pass
-    return 30  # valeur par defaut si on ne trouve pas la minute
+    return 0
 
 
 def stat_val(stats, code, tid=None):
@@ -137,28 +114,12 @@ def stat_val(stats, code, tid=None):
     return 0.0
 
 
-def get_all_stat_codes(stats):
-    """Retourne tous les codes de stats disponibles pour debug"""
-    codes = set()
-    for s in stats:
-        t = s.get("type", {})
-        if isinstance(t, dict):
-            codes.add(t.get("code", ""))
-    return codes
-
-
 def momentum(fixture):
     score = 0
     info = []
 
     minute = get_minute(fixture)
-
     stats = fixture.get("statistics", [])
-
-    # Log les codes disponibles pour le 1er appel
-    codes = get_all_stat_codes(stats)
-    if codes:
-        print("  Codes stats dispo: " + str(codes), flush=True)
 
     hid = None
     aid = None
@@ -169,74 +130,68 @@ def momentum(fixture):
         else:
             aid = p.get("id")
 
-    xg = stat_val(stats, STAT_XG, hid) + stat_val(stats, STAT_XG, aid)
-    son = stat_val(stats, STAT_SHOTS_ON, hid) + stat_val(stats, STAT_SHOTS_ON, aid)
-    sib = stat_val(stats, STAT_SHOTS_BOX, hid) + stat_val(stats, STAT_SHOTS_BOX, aid)
-    cor = stat_val(stats, STAT_CORNERS, hid) + stat_val(stats, STAT_CORNERS, aid)
-    dan = stat_val(stats, STAT_DANGEROUS, hid) + stat_val(stats, STAT_DANGEROUS, aid)
-    tot = stat_val(stats, STAT_SHOTS_TOTAL, hid) + stat_val(stats, STAT_SHOTS_TOTAL, aid)
-    att = stat_val(stats, STAT_ATTACKS, hid) + stat_val(stats, STAT_ATTACKS, aid)
+    son = stat_val(stats, "shots-on-target", hid) + stat_val(stats, "shots-on-target", aid)
+    sib = stat_val(stats, "shots-insidebox", hid) + stat_val(stats, "shots-insidebox", aid)
+    cor = stat_val(stats, "corners", hid) + stat_val(stats, "corners", aid)
+    dan = stat_val(stats, "dangerous-attacks", hid) + stat_val(stats, "dangerous-attacks", aid)
+    tot = stat_val(stats, "shots-total", hid) + stat_val(stats, "shots-total", aid)
+    att = stat_val(stats, "attacks", hid) + stat_val(stats, "attacks", aid)
 
-    print("  xg=" + str(xg) + " son=" + str(son) + " sib=" + str(sib) + " cor=" + str(cor) + " dan=" + str(dan) + " att=" + str(att), flush=True)
-
-    if xg >= 3.0:
-        score += 25
-        info.append("xG eleve: " + str(round(xg, 2)))
-    elif xg >= 2.0:
-        score += 18
-        info.append("xG: " + str(round(xg, 2)))
-    elif xg >= 1.0:
-        score += 10
-        info.append("xG: " + str(round(xg, 2)))
-
+    # Tirs cadres (max 25 pts)
     if son >= 10:
-        score += 15
+        score += 25
         info.append(str(int(son)) + " tirs cadres")
     elif son >= 6:
-        score += 9
+        score += 16
         info.append(str(int(son)) + " tirs cadres")
     elif son >= 3:
-        score += 5
+        score += 8
         info.append(str(int(son)) + " tirs cadres")
 
+    # Tirs dans la surface (max 25 pts)
     if sib >= 12:
-        score += 15
-        info.append(str(int(sib)) + " tirs surface")
+        score += 25
+        info.append(str(int(sib)) + " tirs dans la surface")
     elif sib >= 7:
-        score += 9
-        info.append(str(int(sib)) + " tirs surface")
+        score += 16
+        info.append(str(int(sib)) + " tirs dans la surface")
     elif sib >= 4:
-        score += 5
-        info.append(str(int(sib)) + " tirs surface")
+        score += 8
+        info.append(str(int(sib)) + " tirs dans la surface")
 
+    # Corners (max 15 pts)
     if cor >= 10:
-        score += 10
+        score += 15
         info.append(str(int(cor)) + " corners")
     elif cor >= 6:
-        score += 6
+        score += 9
         info.append(str(int(cor)) + " corners")
     elif cor >= 3:
-        score += 3
+        score += 4
         info.append(str(int(cor)) + " corners")
 
-    if dan >= 60:
-        score += 10
-        info.append(str(int(dan)) + " att dangereuses")
-    elif dan >= 35:
+    # Attaques dangereuses (max 20 pts)
+    if dan >= 80:
+        score += 20
+        info.append(str(int(dan)) + " attaques dangereuses")
+    elif dan >= 50:
+        score += 13
+        info.append(str(int(dan)) + " attaques dangereuses")
+    elif dan >= 25:
         score += 6
-        info.append(str(int(dan)) + " att dangereuses")
-    elif dan >= 20:
-        score += 3
-        info.append(str(int(dan)) + " att dangereuses")
+        info.append(str(int(dan)) + " attaques dangereuses")
 
+    # Precision tirs (max 10 pts)
     if tot > 0 and son / tot >= 0.5:
-        score += 5
-        info.append("Bonne precision")
+        score += 10
+        info.append("Bonne precision " + str(int(son / tot * 100)) + "%")
 
-    mh = minute % 45
-    if 40 <= mh <= 45 or minute >= 85:
-        score += 5
-        info.append("Fin periode min " + str(minute))
+    # Fin de periode (max 5 pts)
+    if minute > 0:
+        mh = minute % 45
+        if 40 <= mh <= 45 or minute >= 85:
+            score += 5
+            info.append("Fin de periode min " + str(minute))
 
     return min(score, 100), info
 
@@ -250,9 +205,9 @@ async def send_alert(bot, fixture, score, info):
     ag = get_goals(fixture, False)
     minute = get_minute(fixture)
     gauge = "X" * int(score / 10) + "." * (10 - int(score / 10))
-    if score >= 85:
+    if score >= 70:
         lvl = "ALERTE MAX"
-    elif score >= 75:
+    elif score >= 55:
         lvl = "FORTE PRESSION"
     else:
         lvl = "PRESSION"
@@ -267,14 +222,14 @@ async def send_alert(bot, fixture, score, info):
     )
     try:
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
-        print("Alerte envoyee: " + h + " vs " + a, flush=True)
+        print("Alerte envoyee: " + h + " vs " + a + " score=" + str(score), flush=True)
     except Exception as e:
         print("ERREUR TG: " + str(e), flush=True)
 
 
 async def run_forever():
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("BOUCLE INFINIE DEMARREE", flush=True)
+    print("BOUCLE INFINIE DEMARREE - seuil=" + str(THRESHOLD), flush=True)
 
     while True:
         print("--- Check ---", flush=True)
@@ -291,7 +246,7 @@ async def run_forever():
                     a = team_name(f, False)
                     hg = get_goals(f, True)
                     ag = get_goals(f, False)
-                    print("[" + str(minute) + "'] " + h + " " + str(hg) + "-" + str(ag) + " " + a + " -> score=" + str(sc), flush=True)
+                    print("[" + str(minute) + "'] " + h + " " + str(hg) + "-" + str(ag) + " " + a + " -> " + str(sc), flush=True)
                     key = str(fid) + "_" + str(minute // 15)
                     if sc >= THRESHOLD and key not in alerts:
                         alerts[key] = True
