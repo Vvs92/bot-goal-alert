@@ -27,7 +27,7 @@ LEAGUES = {
     955: "Saudi Pro League"
 }
 
-THRESHOLD = 50
+THRESHOLD = 40
 INTERVAL = 90
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream=sys.stdout)
