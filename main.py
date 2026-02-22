@@ -48,7 +48,7 @@ def get_fixtures():
             URL + "/livescores/inplay",
             params={
                 "api_token": SPORTMONKS_TOKEN,
-                "include": "participants;scores;state;statistics",
+                "include": "participants;scores;state;statistics.type",
                 "per_page": 50
             },
             timeout=15
