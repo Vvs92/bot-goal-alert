@@ -9,7 +9,10 @@ SPORTMONKS_TOKEN = os.environ.get("SPORTMONKS_TOKEN", "")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-print("DEMARRAGE BOT DEBUG", flush=True)
+print("DEMARRAGE BOT", flush=True)
+print("TOKEN SM: " + str(bool(SPORTMONKS_TOKEN)), flush=True)
+print("TOKEN TG: " + str(bool(TELEGRAM_TOKEN)), flush=True)
+print("CHAT ID: " + str(bool(TELEGRAM_CHAT_ID)), flush=True)
 
 LEAGUES = {
     2: "Champions League",
@@ -34,6 +37,15 @@ logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream
 URL = "https://api.sportmonks.com/v3/football"
 alerts = {}
 
+# Codes corrects SportMonks (confirmes par le debug)
+STAT_SHOTS_ON = "shots-on-target"
+STAT_SHOTS_TOTAL = "shots-total"
+STAT_SHOTS_BOX = "shots-insidebox"
+STAT_CORNERS = "corners"
+STAT_DANGEROUS = "dangerous-attacks"
+STAT_XG = "expected-goals"
+STAT_ATTACKS = "attacks"
+
 
 def get_fixtures():
     try:
@@ -48,7 +60,7 @@ def get_fixtures():
         )
         print("API status: " + str(r.status_code), flush=True)
         if r.status_code != 200:
-            print("API error: " + r.text[:300], flush=True)
+            print("API error: " + r.text[:200], flush=True)
             return []
         d = r.json()
         all_f = d.get("data", [])
@@ -58,26 +70,6 @@ def get_fixtures():
     except Exception as e:
         print("ERREUR API: " + str(e), flush=True)
         return []
-
-
-def debug_fixture(fixture):
-    name = fixture.get("name", "unknown")
-    print("=== DEBUG: " + name + " ===", flush=True)
-
-    # Affiche la structure des stats brutes
-    stats = fixture.get("statistics", [])
-    print("Nb stats: " + str(len(stats)), flush=True)
-    if stats:
-        print("Exemple stat[0]: " + str(stats[0]), flush=True)
-        if len(stats) > 1:
-            print("Exemple stat[1]: " + str(stats[1]), flush=True)
-
-    # Affiche la structure du state
-    state = fixture.get("state", {})
-    print("State: " + str(state), flush=True)
-
-    # Affiche les cles disponibles
-    print("Cles fixture: " + str(list(fixture.keys())), flush=True)
 
 
 def team_name(fixture, home=True):
@@ -111,13 +103,24 @@ def get_minute(fixture):
     try:
         state = fixture.get("state", {})
         if isinstance(state, dict):
-            clock = state.get("clock", {})
-            if isinstance(clock, dict):
-                mm = clock.get("mm", 0)
-                return mm or 0
+            # Format confirme: {'id': 2, 'state': 'INPLAY_1ST_HALF', ...}
+            # La minute n'est pas dans state directement - on cherche dans details
+            details = fixture.get("details", {})
+            if isinstance(details, dict):
+                mm = details.get("minute", 0)
+                if mm:
+                    return int(mm)
+            # Fallback: cherche dans length ou autres champs
+            length = fixture.get("length", 0)
+            starting = fixture.get("starting_at_timestamp", 0)
+            if starting:
+                import time
+                elapsed = int((time.time() - starting) / 60)
+                if 0 < elapsed < 120:
+                    return elapsed
     except Exception:
         pass
-    return 0
+    return 30  # valeur par defaut si on ne trouve pas la minute
 
 
 def stat_val(stats, code, tid=None):
@@ -134,15 +137,28 @@ def stat_val(stats, code, tid=None):
     return 0.0
 
 
+def get_all_stat_codes(stats):
+    """Retourne tous les codes de stats disponibles pour debug"""
+    codes = set()
+    for s in stats:
+        t = s.get("type", {})
+        if isinstance(t, dict):
+            codes.add(t.get("code", ""))
+    return codes
+
+
 def momentum(fixture):
     score = 0
     info = []
 
     minute = get_minute(fixture)
-    if minute < 5:
-        return 0, []
 
     stats = fixture.get("statistics", [])
+
+    # Log les codes disponibles pour le 1er appel
+    codes = get_all_stat_codes(stats)
+    if codes:
+        print("  Codes stats dispo: " + str(codes), flush=True)
 
     hid = None
     aid = None
@@ -153,12 +169,15 @@ def momentum(fixture):
         else:
             aid = p.get("id")
 
-    xg = stat_val(stats, "expected-goals", hid) + stat_val(stats, "expected-goals", aid)
-    son = stat_val(stats, "shots-on-target", hid) + stat_val(stats, "shots-on-target", aid)
-    sib = stat_val(stats, "shots-insidebox", hid) + stat_val(stats, "shots-insidebox", aid)
-    cor = stat_val(stats, "corners", hid) + stat_val(stats, "corners", aid)
-    dan = stat_val(stats, "dangerous-attacks", hid) + stat_val(stats, "dangerous-attacks", aid)
-    tot = stat_val(stats, "shots-total", hid) + stat_val(stats, "shots-total", aid)
+    xg = stat_val(stats, STAT_XG, hid) + stat_val(stats, STAT_XG, aid)
+    son = stat_val(stats, STAT_SHOTS_ON, hid) + stat_val(stats, STAT_SHOTS_ON, aid)
+    sib = stat_val(stats, STAT_SHOTS_BOX, hid) + stat_val(stats, STAT_SHOTS_BOX, aid)
+    cor = stat_val(stats, STAT_CORNERS, hid) + stat_val(stats, STAT_CORNERS, aid)
+    dan = stat_val(stats, STAT_DANGEROUS, hid) + stat_val(stats, STAT_DANGEROUS, aid)
+    tot = stat_val(stats, STAT_SHOTS_TOTAL, hid) + stat_val(stats, STAT_SHOTS_TOTAL, aid)
+    att = stat_val(stats, STAT_ATTACKS, hid) + stat_val(stats, STAT_ATTACKS, aid)
+
+    print("  xg=" + str(xg) + " son=" + str(son) + " sib=" + str(sib) + " cor=" + str(cor) + " dan=" + str(dan) + " att=" + str(att), flush=True)
 
     if xg >= 3.0:
         score += 25
@@ -256,7 +275,6 @@ async def send_alert(bot, fixture, score, info):
 async def run_forever():
     bot = Bot(token=TELEGRAM_TOKEN)
     print("BOUCLE INFINIE DEMARREE", flush=True)
-    first_run = True
 
     while True:
         print("--- Check ---", flush=True)
@@ -265,18 +283,15 @@ async def run_forever():
             if not fixtures:
                 print("Aucun match dans nos ligues", flush=True)
             else:
-                # Debug uniquement sur le premier match du premier check
-                if first_run and fixtures:
-                    debug_fixture(fixtures[0])
-                    first_run = False
-
                 for f in fixtures:
                     fid = f.get("id")
                     minute = get_minute(f)
                     sc, info = momentum(f)
                     h = team_name(f, True)
                     a = team_name(f, False)
-                    print("[" + str(minute) + "] " + h + " vs " + a + " -> " + str(sc), flush=True)
+                    hg = get_goals(f, True)
+                    ag = get_goals(f, False)
+                    print("[" + str(minute) + "'] " + h + " " + str(hg) + "-" + str(ag) + " " + a + " -> score=" + str(sc), flush=True)
                     key = str(fid) + "_" + str(minute // 15)
                     if sc >= THRESHOLD and key not in alerts:
                         alerts[key] = True
