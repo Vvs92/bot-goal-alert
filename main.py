@@ -38,7 +38,6 @@ logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream
 log = logging.getLogger(__name__)
 
 URL = "https://api.sportmonks.com/v3/football"
-HEAD = {"Authorization": "Bearer " + SPORTMONKS_TOKEN}
 
 alerts = {}
 
@@ -47,8 +46,11 @@ def get_fixtures():
     try:
         r = requests.get(
             URL + "/livescores/inplay",
-            headers=HEAD,
-            params={"include": "participants;scores;state;statistics", "per_page": 50},
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "participants;scores;state;statistics",
+                "per_page": 50
+            },
             timeout=15
         )
         print("API status: " + str(r.status_code), flush=True)
