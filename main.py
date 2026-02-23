@@ -20,11 +20,12 @@ LEAGUES = {
     384: "Serie A",
     82: "Bundesliga",
     301: "Ligue 1",
-    72: "Bundesliga 2",
-    48: "Championship",
-    37: "Super Lig",
-    377: "Belgian Pro League",
-    955: "Saudi Pro League"
+    79: "Bundesliga 2",
+    9: "Championship",
+    72: "Eredivisie",
+    600: "Super Lig",
+    208: "Belgian Pro League",
+    501: "Premiership (Ecosse)",
 }
 
 THRESHOLD = 50
@@ -215,15 +216,14 @@ def build_message(fixture, score, son, sib, cor, dan, tot):
 
     if score >= 70:
         lvl = "ALERTE MAX"
-        emoji = "ROUGE"
+        emoji = "[ROUGE]"
     elif score >= 55:
         lvl = "FORTE PRESSION"
-        emoji = "ORANGE"
+        emoji = "[ORANGE]"
     else:
         lvl = "PRESSION"
-        emoji = "JAUNE"
+        emoji = "[JAUNE]"
 
-    # Stats
     stats_lines = []
     if son >= 3:
         stats_lines.append("  * " + str(int(son)) + " tirs cadres")
@@ -234,7 +234,6 @@ def build_message(fixture, score, son, sib, cor, dan, tot):
     if dan >= 20:
         stats_lines.append("  * " + str(int(dan)) + " attaques dangereuses")
 
-    # Recommandations
     recs = []
 
     if score >= 55 and (son >= 6 or sib >= 6):
@@ -274,7 +273,7 @@ def build_message(fixture, score, son, sib, cor, dan, tot):
     recs_text = "\n".join(recs)
 
     msg = (
-        "[" + emoji + "] " + lvl + " - BUT POTENTIEL\n"
+        emoji + " " + lvl + " - BUT POTENTIEL\n"
         + "--------------------\n"
         + "Ligue: " + league + "\n"
         + "Match: " + h + " " + str(hg) + " - " + str(ag) + " " + a + "\n"
