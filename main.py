@@ -30,150 +30,19 @@ LEAGUES = {
 
 THRESHOLD = 50
 INTERVAL = 90
-PRE_MATCH_WINDOW = 30  # minutes avant le match
+PRE_MATCH_WINDOW = 30
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream=sys.stdout)
 
 URL = "https://api.sportmonks.com/v3/football"
 alerts = {}
 prematch_sent = {}
+form_cache = {}
 
 
-def get_fixtures():
-    try:
-        r = requests.get(
-            URL + "/livescores/inplay",
-            params={
-                "api_token": SPORTMONKS_TOKEN,
-                "include": "participants;scores;state;statistics.type",
-                "per_page": 50
-            },
-            timeout=15
-        )
-        print("API status: " + str(r.status_code), flush=True)
-        if r.status_code != 200:
-            print("API error: " + r.text[:200], flush=True)
-            return []
-        d = r.json()
-        all_f = d.get("data", [])
-        filtered = [f for f in all_f if f.get("league_id") in LEAGUES]
-        print(str(len(all_f)) + " matchs live, " + str(len(filtered)) + " dans nos ligues", flush=True)
-        return filtered
-    except Exception as e:
-        print("ERREUR API live: " + str(e), flush=True)
-        return []
-
-
-def get_upcoming_fixtures():
-    """Recupere les matchs a venir dans les 30 prochaines minutes"""
-    try:
-        now = int(time.time())
-        soon = now + (PRE_MATCH_WINDOW * 60)
-        from datetime import datetime, timezone
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        r = requests.get(
-            URL + "/fixtures/date/" + date_str,
-            params={
-                "api_token": SPORTMONKS_TOKEN,
-                "include": "participants",
-                "per_page": 100
-            },
-            timeout=15
-        )
-        if r.status_code != 200:
-            return []
-        d = r.json()
-        all_f = d.get("data", [])
-        upcoming = []
-        for f in all_f:
-            if f.get("league_id") not in LEAGUES:
-                continue
-            start = f.get("starting_at_timestamp", 0)
-            if start and now < start <= soon:
-                upcoming.append(f)
-        print(str(len(upcoming)) + " match(s) a venir dans 30min", flush=True)
-        return upcoming
-    except Exception as e:
-        print("ERREUR upcoming: " + str(e), flush=True)
-        return []
-
-
-def get_top_scorers(fixture_id, team_id):
-    """Recupere les meilleurs buteurs d'une equipe pour ce match"""
-    try:
-        r = requests.get(
-            URL + "/fixtures/" + str(fixture_id) + "/lineups",
-            params={
-                "api_token": SPORTMONKS_TOKEN,
-                "include": "player.statistics.details.type",
-            },
-            timeout=15
-        )
-        if r.status_code != 200:
-            return []
-        d = r.json()
-        players = d.get("data", [])
-        scorers = []
-        for p in players:
-            if p.get("team_id") != team_id:
-                continue
-            player = p.get("player", {})
-            name = str(player.get("name", ""))
-            if not name:
-                continue
-            season_goals = 0
-            recent_goals = 0
-            stats = player.get("statistics", [])
-            for stat in stats:
-                details = stat.get("details", [])
-                for detail in details:
-                    t = detail.get("type", {})
-                    if isinstance(t, dict) and t.get("code") == "goals":
-                        val = detail.get("data", {}).get("value", 0)
-                        season_goals += int(val) if val else 0
-            if season_goals >= 3:
-                scorers.append({
-                    "name": name,
-                    "season_goals": season_goals,
-                    "recent_goals": recent_goals
-                })
-        scorers.sort(key=lambda x: x["season_goals"], reverse=True)
-        return scorers[:4]
-    except Exception as e:
-        print("ERREUR scorers: " + str(e), flush=True)
-        return []
-
-
-def get_player_recent_form(fixture_id, team_id):
-    """Recupere les joueurs en forme recente via les events des derniers matchs"""
-    try:
-        r = requests.get(
-            URL + "/teams/" + str(team_id) + "/fixtures",
-            params={
-                "api_token": SPORTMONKS_TOKEN,
-                "include": "events.type",
-                "per_page": 5
-            },
-            timeout=15
-        )
-        if r.status_code != 200:
-            return {}
-        d = r.json()
-        recent_matches = d.get("data", [])
-        scorer_recent = {}
-        for match in recent_matches[:3]:
-            events = match.get("events", [])
-            for ev in events:
-                t = ev.get("type", {})
-                if isinstance(t, dict) and "goal" in t.get("code", "").lower():
-                    player_name = str(ev.get("player_name", "") or "")
-                    if player_name:
-                        scorer_recent[player_name] = scorer_recent.get(player_name, 0) + 1
-        return scorer_recent
-    except Exception as e:
-        print("ERREUR recent form: " + str(e), flush=True)
-        return {}
-
+# ─────────────────────────────────────────
+# HELPERS GENERAUX
+# ─────────────────────────────────────────
 
 def team_name(fixture, home=True):
     try:
@@ -241,6 +110,308 @@ def stat_val(stats, code, tid=None):
     return 0.0
 
 
+# ─────────────────────────────────────────
+# FORME DES EQUIPES
+# ─────────────────────────────────────────
+
+def get_team_form(team_id):
+    """Analyse la forme recente d'une equipe sur ses 5 derniers matchs"""
+    cache_key = str(team_id)
+    if cache_key in form_cache:
+        cached_time, cached_data = form_cache[cache_key]
+        if time.time() - cached_time < 3600:
+            return cached_data
+
+    try:
+        r = requests.get(
+            URL + "/teams/" + str(team_id) + "/fixtures",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "scores;events.type",
+                "per_page": 5,
+                "sort": "-starting_at"
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return {}
+
+        d = r.json()
+        matches = d.get("data", [])
+
+        if not matches:
+            return {}
+
+        form = {
+            "unbeaten": 0,
+            "wins": 0,
+            "draws": 0,
+            "losses": 0,
+            "scored_1st_half": 0,
+            "scored_2nd_half": 0,
+            "scored_last_15": 0,
+            "always_scored": True,
+            "clean_sheets": 0,
+            "total_matches": 0,
+        }
+
+        for match in matches:
+            form["total_matches"] += 1
+            fid = match.get("id")
+            scores = match.get("scores", [])
+            events = match.get("events", [])
+
+            home_goals = 0
+            away_goals = 0
+            team_goals_1h = 0
+            team_goals_2h = 0
+            team_goals_last15 = 0
+            team_scored = False
+
+            # Determine si l'equipe joue a domicile ou exterieur
+            is_home = False
+            participants = match.get("participants", [])
+            for p in participants:
+                if p.get("id") == team_id:
+                    if p.get("meta", {}).get("location") == "home":
+                        is_home = True
+
+            # Score final
+            for s in scores:
+                if s.get("description") == "FT":
+                    sd = s.get("score", {})
+                    home_goals = int(sd.get("goals", 0) or 0)
+                    away_goals = int(sd.get("participant", 0) or 0)
+
+            team_g = home_goals if is_home else away_goals
+            opp_g = away_goals if is_home else home_goals
+
+            if team_g > opp_g:
+                form["wins"] += 1
+                form["unbeaten"] += 1
+            elif team_g == opp_g:
+                form["draws"] += 1
+                form["unbeaten"] += 1
+            else:
+                form["losses"] += 1
+
+            if team_g == 0:
+                form["always_scored"] = False
+            else:
+                team_scored = True
+
+            if opp_g == 0:
+                form["clean_sheets"] += 1
+
+            # Analyse des buts par periode via events
+            for ev in events:
+                t = ev.get("type", {})
+                code = t.get("code", "") if isinstance(t, dict) else ""
+                if "goal" not in code.lower():
+                    continue
+                ev_team = ev.get("participant_id") or ev.get("team_id")
+                if ev_team != team_id:
+                    continue
+                minute_ev = int(ev.get("minute", 0) or 0)
+                if minute_ev <= 45:
+                    team_goals_1h += 1
+                else:
+                    team_goals_2h += 1
+                if minute_ev >= 75:
+                    team_goals_last15 += 1
+
+            if team_goals_1h > 0:
+                form["scored_1st_half"] += 1
+            if team_goals_2h > 0:
+                form["scored_2nd_half"] += 1
+            if team_goals_last15 > 0:
+                form["scored_last_15"] += 1
+
+        form_cache[cache_key] = (time.time(), form)
+        return form
+
+    except Exception as e:
+        print("ERREUR form: " + str(e), flush=True)
+        return {}
+
+
+def build_form_insights(form, team_name_str, current_goals, minute):
+    """Genere les insights de forme pertinents pour le contexte du match"""
+    insights = []
+    n = form.get("total_matches", 0)
+    if n == 0:
+        return insights
+
+    unbeaten = form.get("unbeaten", 0)
+    wins = form.get("wins", 0)
+    always_scored = form.get("always_scored", False)
+    scored_1h = form.get("scored_1st_half", 0)
+    scored_2h = form.get("scored_2nd_half", 0)
+    scored_last15 = form.get("scored_last_15", 0)
+    clean_sheets = form.get("clean_sheets", 0)
+
+    # Invincibilite
+    if unbeaten == n and n >= 4:
+        insights.append("\U0001f525 " + team_name_str + " est invaincue sur ses " + str(n) + " derniers matchs")
+    elif wins >= 4:
+        insights.append("\U0001f525 " + team_name_str + " a gagne " + str(wins) + " de ses " + str(n) + " derniers matchs")
+
+    # Marque toujours au moins 1 but
+    if always_scored and n >= 4:
+        insights.append("\u26bd " + team_name_str + " a marque dans chacun de ses " + str(n) + " derniers matchs")
+
+    # Habitudes de buts par periode
+    if minute < 46 and scored_1h >= int(n * 0.6):
+        insights.append("\u23f0 " + team_name_str + " marque souvent en 1ere MT (" + str(scored_1h) + "/" + str(n) + " matchs)")
+
+    if minute >= 46 and scored_2h >= int(n * 0.6):
+        insights.append("\u23f0 " + team_name_str + " marque souvent en 2eme MT (" + str(scored_2h) + "/" + str(n) + " matchs)")
+
+    if minute >= 70 and scored_last15 >= int(n * 0.5):
+        insights.append("\u23f0 " + team_name_str + " marque souvent en fin de match (" + str(scored_last15) + "/" + str(n) + " matchs)")
+
+    # Equipe qui n'a pas encore marque ce match
+    if current_goals == 0 and always_scored and n >= 3:
+        insights.append("\u26a0\ufe0f " + team_name_str + " n'a pas encore marque - marque dans tous ses derniers matchs!")
+
+    return insights
+
+
+# ─────────────────────────────────────────
+# API FIXTURES
+# ─────────────────────────────────────────
+
+def get_fixtures():
+    try:
+        r = requests.get(
+            URL + "/livescores/inplay",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "participants;scores;state;statistics.type",
+                "per_page": 50
+            },
+            timeout=15
+        )
+        print("API status: " + str(r.status_code), flush=True)
+        if r.status_code != 200:
+            return []
+        d = r.json()
+        all_f = d.get("data", [])
+        filtered = [f for f in all_f if f.get("league_id") in LEAGUES]
+        print(str(len(all_f)) + " matchs live, " + str(len(filtered)) + " dans nos ligues", flush=True)
+        return filtered
+    except Exception as e:
+        print("ERREUR API live: " + str(e), flush=True)
+        return []
+
+
+def get_upcoming_fixtures():
+    try:
+        now = int(time.time())
+        soon = now + (PRE_MATCH_WINDOW * 60)
+        from datetime import datetime, timezone
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        r = requests.get(
+            URL + "/fixtures/date/" + date_str,
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "participants",
+                "per_page": 100
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return []
+        d = r.json()
+        all_f = d.get("data", [])
+        upcoming = []
+        for f in all_f:
+            if f.get("league_id") not in LEAGUES:
+                continue
+            start = f.get("starting_at_timestamp", 0)
+            if start and now < start <= soon:
+                upcoming.append(f)
+        print(str(len(upcoming)) + " match(s) a venir dans 30min", flush=True)
+        return upcoming
+    except Exception as e:
+        print("ERREUR upcoming: " + str(e), flush=True)
+        return []
+
+
+def get_top_scorers(fixture_id, team_id):
+    try:
+        r = requests.get(
+            URL + "/fixtures/" + str(fixture_id) + "/lineups",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "player.statistics.details.type",
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return []
+        d = r.json()
+        players = d.get("data", [])
+        scorers = []
+        for p in players:
+            if p.get("team_id") != team_id:
+                continue
+            player = p.get("player", {})
+            name = str(player.get("name", ""))
+            if not name:
+                continue
+            season_goals = 0
+            stats = player.get("statistics", [])
+            for stat in stats:
+                details = stat.get("details", [])
+                for detail in details:
+                    t = detail.get("type", {})
+                    if isinstance(t, dict) and t.get("code") == "goals":
+                        val = detail.get("data", {}).get("value", 0)
+                        season_goals += int(val) if val else 0
+            if season_goals >= 3:
+                scorers.append({"name": name, "season_goals": season_goals})
+        scorers.sort(key=lambda x: x["season_goals"], reverse=True)
+        return scorers[:4]
+    except Exception as e:
+        print("ERREUR scorers: " + str(e), flush=True)
+        return []
+
+
+def get_player_recent_form(fixture_id, team_id):
+    try:
+        r = requests.get(
+            URL + "/teams/" + str(team_id) + "/fixtures",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "events.type",
+                "per_page": 5
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return {}
+        d = r.json()
+        recent_matches = d.get("data", [])
+        scorer_recent = {}
+        for match in recent_matches[:3]:
+            events = match.get("events", [])
+            for ev in events:
+                t = ev.get("type", {})
+                if isinstance(t, dict) and "goal" in t.get("code", "").lower():
+                    player_name = str(ev.get("player_name", "") or "")
+                    if player_name:
+                        scorer_recent[player_name] = scorer_recent.get(player_name, 0) + 1
+        return scorer_recent
+    except Exception as e:
+        print("ERREUR recent form: " + str(e), flush=True)
+        return {}
+
+
+# ─────────────────────────────────────────
+# MOMENTUM
+# ─────────────────────────────────────────
+
 def get_dominant_team(fixture, stats):
     hid = None
     aid = None
@@ -276,7 +447,6 @@ def get_dominant_team(fixture, stats):
 def momentum(fixture):
     score = 0
     stats = fixture.get("statistics", [])
-
     hid = None
     aid = None
     for p in fixture.get("participants", []):
@@ -326,8 +496,14 @@ def momentum(fixture):
     return min(score, 100), son, sib, cor, dan, tot
 
 
-def build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_scorers, h_recent, a_recent):
+# ─────────────────────────────────────────
+# MESSAGES
+# ─────────────────────────────────────────
+
+def build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_scorers, h_recent, a_recent, h_form, a_form):
     sep = "\u2501" * 20
+    hid = get_team_id(fixture, True)
+    aid = get_team_id(fixture, False)
 
     h_lines = []
     for s in h_scorers:
@@ -356,28 +532,65 @@ def build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_s
     h_text = "\n".join(h_lines) if h_lines else "  \u2022 Donnees non disponibles"
     a_text = "\n".join(a_lines) if a_lines else "  \u2022 Donnees non disponibles"
 
-    # Recommandations buteurs
+    # Forme equipes
+    h_form_lines = []
+    a_form_lines = []
+
+    if h_form:
+        n = h_form.get("total_matches", 0)
+        if n > 0:
+            if h_form.get("unbeaten", 0) == n:
+                h_form_lines.append("  \U0001f7e2 Invaincue sur " + str(n) + " matchs")
+            if h_form.get("always_scored", False):
+                h_form_lines.append("  \u26bd Marque dans chacun de ses " + str(n) + " derniers matchs")
+            s1h = h_form.get("scored_1st_half", 0)
+            if s1h >= int(n * 0.6):
+                h_form_lines.append("  \u23f0 Marque souvent en 1ere MT (" + str(s1h) + "/" + str(n) + ")")
+            sl15 = h_form.get("scored_last_15", 0)
+            if sl15 >= int(n * 0.5):
+                h_form_lines.append("  \u23f0 Marque souvent en fin de match (" + str(sl15) + "/" + str(n) + ")")
+
+    if a_form:
+        n = a_form.get("total_matches", 0)
+        if n > 0:
+            if a_form.get("unbeaten", 0) == n:
+                a_form_lines.append("  \U0001f7e2 Invaincue sur " + str(n) + " matchs")
+            if a_form.get("always_scored", False):
+                a_form_lines.append("  \u26bd Marque dans chacun de ses " + str(n) + " derniers matchs")
+            s1h = a_form.get("scored_1st_half", 0)
+            if s1h >= int(n * 0.6):
+                a_form_lines.append("  \u23f0 Marque souvent en 1ere MT (" + str(s1h) + "/" + str(n) + ")")
+            sl15 = a_form.get("scored_last_15", 0)
+            if sl15 >= int(n * 0.5):
+                a_form_lines.append("  \u23f0 Marque souvent en fin de match (" + str(sl15) + "/" + str(n) + ")")
+
+    h_form_text = "\n".join(h_form_lines) if h_form_lines else "  \u2022 Forme non disponible"
+    a_form_text = "\n".join(a_form_lines) if a_form_lines else "  \u2022 Forme non disponible"
+
+    # Recommandations
     recs = []
-    top_scorers_all = []
+    top_all = []
     for s in h_scorers:
         recent = h_recent.get(s["name"], 0)
-        top_scorers_all.append((s["name"], s["season_goals"], recent))
+        top_all.append((s["name"], s["season_goals"], recent))
     for s in a_scorers:
         recent = a_recent.get(s["name"], 0)
-        top_scorers_all.append((s["name"], s["season_goals"], recent))
+        top_all.append((s["name"], s["season_goals"], recent))
+    top_all.sort(key=lambda x: (x[2] * 10 + x[1]), reverse=True)
 
-    top_scorers_all.sort(key=lambda x: (x[2] * 10 + x[1]), reverse=True)
-
-    for name, goals, recent in top_scorers_all[:3]:
+    for name, goals, recent in top_all[:3]:
         if recent >= 1 and goals >= 4:
             recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (forme + volume)")
         elif recent >= 2:
-            recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (en feu en ce moment)")
+            recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (en feu)")
         elif goals >= 6:
             recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (top buteur saison)")
 
+    if h_form.get("always_scored") and a_form.get("always_scored"):
+        recs.append("  \u2192 \U0001f3af BTTS probable - les deux equipes marquent toujours")
+
     if not recs:
-        recs.append("  \u2192 \U0001f440 Surveiller les buteurs reguliers de chaque equipe")
+        recs.append("  \u2192 \U0001f440 Surveiller les buteurs reguliers")
 
     recs_text = "\n".join(recs)
 
@@ -388,11 +601,15 @@ def build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_s
         + "\u2694\ufe0f " + h + " vs " + a + "\n"
         + "\u23f1\ufe0f Coup d'envoi dans ~" + str(minutes_before) + " min\n"
         + sep + "\n"
-        + "\U0001f534 " + h + " - Buteurs en forme:\n"
+        + "\U0001f534 " + h + " - Buteurs:\n"
         + h_text + "\n"
+        + "\U0001f4ca Forme " + h + ":\n"
+        + h_form_text + "\n"
         + sep + "\n"
-        + "\U0001f535 " + a + " - Buteurs en forme:\n"
+        + "\U0001f535 " + a + " - Buteurs:\n"
         + a_text + "\n"
+        + "\U0001f4ca Forme " + a + ":\n"
+        + a_form_text + "\n"
         + sep + "\n"
         + "\U0001f4a1 QUOI JOUER SUR BETIFY:\n"
         + recs_text + "\n"
@@ -403,7 +620,7 @@ def build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_s
     return msg
 
 
-def build_live_message(fixture, score, son, sib, cor, dan, tot):
+def build_live_message(fixture, score, son, sib, cor, dan, tot, h_form, a_form):
     minute = get_minute(fixture)
     lid = fixture.get("league_id")
     league = str(LEAGUES.get(lid, "Ligue"))
@@ -436,6 +653,13 @@ def build_live_message(fixture, score, son, sib, cor, dan, tot):
         stats_lines.append("  \u2022 " + str(int(cor)) + " corners")
     if dan >= 20:
         stats_lines.append("  \u2022 " + str(int(dan)) + " attaques dangereuses")
+
+    # Forme insights
+    form_lines = []
+    h_insights = build_form_insights(h_form, h, hg, minute)
+    a_insights = build_form_insights(a_form, a, ag, minute)
+    form_lines.extend(h_insights)
+    form_lines.extend(a_insights)
 
     recs = []
 
@@ -474,7 +698,12 @@ def build_live_message(fixture, score, son, sib, cor, dan, tot):
 
     stats_text = "\n".join(stats_lines) if stats_lines else "  \u2022 Stats en cours"
     recs_text = "\n".join(recs)
+    form_text = "\n".join(form_lines) if form_lines else ""
     sep = "\u2501" * 20
+
+    form_section = ""
+    if form_text:
+        form_section = sep + "\n\U0001f4ca FORME DES EQUIPES:\n" + form_text + "\n"
 
     msg = (
         emoji + " " + lvl + " - BUT POTENTIEL\n"
@@ -486,6 +715,7 @@ def build_live_message(fixture, score, son, sib, cor, dan, tot):
         + sep + "\n"
         + "\U0001f4ca STATS:\n"
         + stats_text + "\n"
+        + form_section
         + sep + "\n"
         + "\U0001f4a1 QUOI JOUER SUR BETIFY:\n"
         + recs_text + "\n"
@@ -496,8 +726,11 @@ def build_live_message(fixture, score, son, sib, cor, dan, tot):
     return msg
 
 
+# ─────────────────────────────────────────
+# BOUCLE PRINCIPALE
+# ─────────────────────────────────────────
+
 async def send_prematch_alerts(bot):
-    """Envoie les alertes pre-match pour les matchs a venir"""
     upcoming = get_upcoming_fixtures()
     for fixture in upcoming:
         fid = fixture.get("id")
@@ -522,21 +755,18 @@ async def send_prematch_alerts(bot):
         a_scorers = get_top_scorers(fid, aid) if aid else []
         h_recent = get_player_recent_form(fid, hid) if hid else {}
         a_recent = get_player_recent_form(fid, aid) if aid else {}
-
-        # Filtre: envoie seulement si au moins un buteur notable
-        if not h_scorers and not a_scorers:
-            print("Pas de buteurs notables pour " + h + " vs " + a, flush=True)
-            prematch_sent[str(fid)] = True
-            continue
+        h_form = get_team_form(hid) if hid else {}
+        a_form = get_team_form(aid) if aid else {}
 
         try:
-            msg = build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_scorers, h_recent, a_recent)
+            msg = build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_scorers, h_recent, a_recent, h_form, a_form)
             await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
             prematch_sent[str(fid)] = True
             print("Pre-match envoye: " + h + " vs " + a, flush=True)
             await asyncio.sleep(2)
         except Exception as e:
-            print("ERREUR pre-match msg: " + str(e), flush=True)
+            print("ERREUR pre-match: " + str(e), flush=True)
+            prematch_sent[str(fid)] = True
 
         if len(prematch_sent) > 200:
             keys = list(prematch_sent.keys())
@@ -551,10 +781,8 @@ async def run_forever():
     while True:
         print("--- Check ---", flush=True)
         try:
-            # 1. Alertes pre-match
             await send_prematch_alerts(bot)
 
-            # 2. Alertes live momentum
             fixtures = get_fixtures()
             if not fixtures:
                 print("Aucun match live dans nos ligues", flush=True)
@@ -571,10 +799,14 @@ async def run_forever():
                     key = str(fid) + "_" + str(minute // 15)
                     if sc >= THRESHOLD and key not in alerts:
                         alerts[key] = True
+                        hid = get_team_id(f, True)
+                        aid = get_team_id(f, False)
+                        h_form = get_team_form(hid) if hid else {}
+                        a_form = get_team_form(aid) if aid else {}
                         try:
-                            msg = build_live_message(f, sc, son, sib, cor, dan, tot)
+                            msg = build_live_message(f, sc, son, sib, cor, dan, tot, h_form, a_form)
                             await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
-                            print("Alerte live envoyee: " + h + " vs " + a, flush=True)
+                            print("Alerte live: " + h + " vs " + a, flush=True)
                         except Exception as e:
                             print("ERREUR live msg: " + str(e), flush=True)
                         await asyncio.sleep(2)
