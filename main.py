@@ -27,7 +27,7 @@ LEAGUES = {
     955: "Saudi Pro League"
 }
 
-THRESHOLD = 40
+THRESHOLD = 50
 INTERVAL = 90
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream=sys.stdout)
@@ -66,9 +66,9 @@ def team_name(fixture, home=True):
         for p in fixture.get("participants", []):
             loc = p.get("meta", {}).get("location", "")
             if home and loc == "home":
-                return p.get("name", "Home")
+                return str(p.get("name", "Home"))
             if not home and loc == "away":
-                return p.get("name", "Away")
+                return str(p.get("name", "Away"))
     except Exception:
         pass
     return "Home" if home else "Away"
@@ -80,9 +80,9 @@ def get_goals(fixture, home=True):
             if s.get("description") == "CURRENT":
                 sd = s.get("score", {})
                 if home:
-                    return sd.get("goals", 0) or 0
+                    return int(sd.get("goals", 0) or 0)
                 else:
-                    return sd.get("participant", 0) or 0
+                    return int(sd.get("participant", 0) or 0)
     except Exception:
         pass
     return 0
@@ -93,7 +93,7 @@ def get_minute(fixture):
         starting = fixture.get("starting_at_timestamp", 0)
         if starting:
             elapsed = int((time.time() - starting) / 60)
-            if 0 < elapsed < 120:
+            if 0 < elapsed < 130:
                 return elapsed
     except Exception:
         pass
@@ -115,19 +115,18 @@ def stat_val(stats, code, tid=None):
 
 
 def get_dominant_team(fixture, stats):
-    """Trouve l'equipe qui domine le match"""
     hid = None
     aid = None
-    hname = ""
-    aname = ""
+    hname = "Home"
+    aname = "Away"
     for p in fixture.get("participants", []):
         loc = p.get("meta", {}).get("location", "")
         if loc == "home":
             hid = p.get("id")
-            hname = p.get("name", "Home")
+            hname = str(p.get("name", "Home"))
         else:
             aid = p.get("id")
-            aname = p.get("name", "Away")
+            aname = str(p.get("name", "Away"))
 
     h_dan = stat_val(stats, "dangerous-attacks", hid)
     a_dan = stat_val(stats, "dangerous-attacks", aid)
@@ -140,18 +139,15 @@ def get_dominant_team(fixture, stats):
     a_total = a_dan + (a_son * 3) + a_cor
 
     if h_total > a_total * 1.4:
-        return hname, "home", h_total, a_total
+        return hname, "home"
     elif a_total > h_total * 1.4:
-        return aname, "away", a_total, h_total
+        return aname, "away"
     else:
-        return None, "balanced", max(h_total, a_total), min(h_total, a_total)
+        return None, "balanced"
 
 
 def momentum(fixture):
     score = 0
-    info = []
-
-    minute = get_minute(fixture)
     stats = fixture.get("statistics", [])
 
     hid = None
@@ -171,162 +167,146 @@ def momentum(fixture):
 
     if son >= 10:
         score += 25
-        info.append(("shots", str(int(son)) + " tirs cadres"))
     elif son >= 6:
         score += 16
-        info.append(("shots", str(int(son)) + " tirs cadres"))
     elif son >= 3:
         score += 8
-        info.append(("shots", str(int(son)) + " tirs cadres"))
 
     if sib >= 12:
         score += 25
-        info.append(("box", str(int(sib)) + " tirs dans la surface"))
     elif sib >= 7:
         score += 16
-        info.append(("box", str(int(sib)) + " tirs dans la surface"))
     elif sib >= 4:
         score += 8
-        info.append(("box", str(int(sib)) + " tirs dans la surface"))
 
     if cor >= 10:
         score += 15
-        info.append(("corners", str(int(cor)) + " corners"))
     elif cor >= 6:
         score += 9
-        info.append(("corners", str(int(cor)) + " corners"))
     elif cor >= 3:
         score += 4
-        info.append(("corners", str(int(cor)) + " corners"))
 
     if dan >= 80:
         score += 20
-        info.append(("pressure", str(int(dan)) + " attaques dangereuses"))
     elif dan >= 50:
         score += 13
-        info.append(("pressure", str(int(dan)) + " attaques dangereuses"))
     elif dan >= 25:
         score += 6
-        info.append(("pressure", str(int(dan)) + " attaques dangereuses"))
 
     if tot > 0 and son / tot >= 0.5:
         score += 10
-        info.append(("precision", "Precision " + str(int(son / tot * 100)) + "%"))
 
-    if minute > 0:
-        mh = minute % 45
-        if 40 <= mh <= 45 or minute >= 85:
-            score += 5
-            info.append(("endgame", "Fin de periode min " + str(minute)))
-
-    return min(score, 100), info, son, sib, cor, dan, tot, minute
+    return min(score, 100), son, sib, cor, dan, tot
 
 
-def build_recommendations(score, info_tags, son, sib, cor, dan, tot, minute, hg, ag, dominant_team, dominant_side):
-    """Genere les recommandations de paris selon le contexte"""
-    recs = []
-    tags = [t[0] for t in info_tags]
-    total_goals = hg + ag
-
-    # --- PROCHAIN BUT ---
-    if score >= 60 and ("shots" in tags or "box" in tags):
-        if dominant_side == "home":
-            recs.append("⚽ PROCHAIN BUT -> " + dominant_team + " (domine)")
-        elif dominant_side == "away":
-            recs.append("⚽ PROCHAIN BUT -> " + dominant_team + " (domine)")
-        else:
-            recs.append("⚽ PROCHAIN BUT -> Les deux peuvent scorer (match ouvert)")
-
-    # --- OVER BUTS ---
-    if score >= 55 and (son >= 6 or sib >= 6):
-        current = "Over " + str(total_goals) + ".5 buts"
-        recs.append("📈 " + current + " dans le match")
-        if minute < 45:
-            recs.append("📈 Over 0.5 buts ce reste de 1ere MT")
-        elif minute < 75:
-            recs.append("📈 Over 0.5 buts ce reste de 2eme MT")
-
-    # --- CORNERS ---
-    if "corners" in tags and cor >= 5:
-        next_cor = int(cor) + 2
-        recs.append("🚩 Prochain corner probable / Over " + str(next_cor) + ".5 corners")
-
-    # --- EQUIPE ETOUFFEE ---
-    if dominant_team and score >= 55:
-        recs.append("😤 " + dominant_team + " etouffe l'adversaire -> miser sur elle")
-
-    # --- BTTS ---
-    if hg == 0 and ag == 0 and score >= 55 and minute >= 30:
-        recs.append("🎯 BTTS (les deux marquent) possible - 0-0 sous pression")
-    elif hg > 0 and ag == 0 and score >= 55:
-        recs.append("🎯 BTTS possible - equipe a 0 sous forte pression")
-    elif hg == 0 and ag > 0 and score >= 55:
-        recs.append("🎯 BTTS possible - equipe a 0 sous forte pression")
-
-    # --- CARTONS ---
-    if dan >= 70 and score >= 55:
-        recs.append("🟨 Pression intense -> cartons probables")
-
-    if not recs:
-        recs.append("👀 A surveiller - pression en hausse")
-
-    return recs
-
-
-async def send_alert(bot, fixture, score, info_tags, son, sib, cor, dan, tot, minute):
+def build_message(fixture, score, son, sib, cor, dan, tot):
+    minute = get_minute(fixture)
     lid = fixture.get("league_id")
-    league = LEAGUES.get(lid, "Ligue")
+    league = str(LEAGUES.get(lid, "Ligue"))
     h = team_name(fixture, True)
     a = team_name(fixture, False)
     hg = get_goals(fixture, True)
     ag = get_goals(fixture, False)
-
     stats = fixture.get("statistics", [])
-    dominant_team, dominant_side, dom_score, weak_score = get_dominant_team(fixture, stats)
+    dominant_team, dominant_side = get_dominant_team(fixture, stats)
+    total_goals = hg + ag
 
     gauge = "X" * int(score / 10) + "." * (10 - int(score / 10))
 
     if score >= 70:
         lvl = "ALERTE MAX"
-        emoji = "🔴"
+        emoji = "ROUGE"
     elif score >= 55:
         lvl = "FORTE PRESSION"
-        emoji = "🟠"
+        emoji = "ORANGE"
     else:
         lvl = "PRESSION"
-        emoji = "🟡"
+        emoji = "JAUNE"
 
-    stats_lines = "\n".join(["  • " + t[1] for t in info_tags])
-    recs = build_recommendations(score, info_tags, son, sib, cor, dan, tot, minute, hg, ag, dominant_team, dominant_side)
-    recs_lines = "\n".join(["  → " + r for r in recs])
+    # Stats
+    stats_lines = []
+    if son >= 3:
+        stats_lines.append("  * " + str(int(son)) + " tirs cadres")
+    if sib >= 3:
+        stats_lines.append("  * " + str(int(sib)) + " tirs dans la surface")
+    if cor >= 3:
+        stats_lines.append("  * " + str(int(cor)) + " corners")
+    if dan >= 20:
+        stats_lines.append("  * " + str(int(dan)) + " attaques dangereuses")
+
+    # Recommandations
+    recs = []
+
+    if score >= 55 and (son >= 6 or sib >= 6):
+        if dominant_side == "home":
+            recs.append(">> Prochain but: " + h + " (domine)")
+        elif dominant_side == "away":
+            recs.append(">> Prochain but: " + a + " (domine)")
+        else:
+            recs.append(">> Prochain but: Match ouvert (les deux peuvent scorer)")
+
+    if score >= 55 and (son >= 5 or sib >= 5):
+        recs.append(">> Over " + str(total_goals) + ".5 buts dans le match")
+        if minute < 46:
+            recs.append(">> Over 0.5 buts reste 1ere MT")
+        else:
+            recs.append(">> Over 0.5 buts reste 2eme MT")
+
+    if cor >= 5:
+        next_cor = int(cor) + 2
+        recs.append(">> Plus de corners / Over " + str(next_cor) + ".5 corners")
+
+    if dominant_team and score >= 55:
+        recs.append(">> " + dominant_team + " etouffe l adversaire")
+
+    if hg == 0 and ag == 0 and score >= 55 and minute >= 30:
+        recs.append(">> BTTS possible - 0-0 sous forte pression")
+    elif total_goals > 0 and (hg == 0 or ag == 0) and score >= 55:
+        recs.append(">> BTTS possible - equipe a 0 sous pression")
+
+    if dan >= 70:
+        recs.append(">> Cartons probables (intensite elevee)")
+
+    if not recs:
+        recs.append(">> A surveiller - pression en hausse")
+
+    stats_text = "\n".join(stats_lines) if stats_lines else "  * Stats en cours"
+    recs_text = "\n".join(recs)
 
     msg = (
-        emoji + " " + lvl + " - BUT POTENTIEL\n"
-        + "━━━━━━━━━━━━━━━━━━━━\n"
-        + "🏆 " + league + "\n"
-        + "⚔️  " + h + " " + str(hg) + " - " + str(ag) + " " + a + "\n"
-        + "⏱️  " + str(minute) + "' | Score momentum: " + str(score) + "/100\n"
+        "[" + emoji + "] " + lvl + " - BUT POTENTIEL\n"
+        + "--------------------\n"
+        + "Ligue: " + league + "\n"
+        + "Match: " + h + " " + str(hg) + " - " + str(ag) + " " + a + "\n"
+        + "Minute: " + str(minute) + "' | Score: " + str(score) + "/100\n"
         + gauge + "\n"
-        + "━━━━━━━━━━━━━━━━━━━━\n"
-        + "📊 STATS:\n"
-        + stats_lines + "\n"
-        + "━━━━━━━━━━━━━━━━━━━━\n"
-        + "💡 QUOI JOUER SUR BETIFY:\n"
-        + recs_lines + "\n"
-        + "━━━━━━━━━━━━━━━━━━━━\n"
-        + "⚠️ Parie de facon responsable"
+        + "--------------------\n"
+        + "STATS:\n"
+        + stats_text + "\n"
+        + "--------------------\n"
+        + "QUOI JOUER SUR BETIFY:\n"
+        + recs_text + "\n"
+        + "--------------------\n"
+        + "Parie de facon responsable"
     )
 
+    return msg
+
+
+async def send_alert(bot, fixture, score, son, sib, cor, dan, tot):
     try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg)
+        msg = build_message(fixture, score, son, sib, cor, dan, tot)
+        h = team_name(fixture, True)
+        a = team_name(fixture, False)
+        await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
         print("Alerte envoyee: " + h + " vs " + a + " score=" + str(score), flush=True)
     except Exception as e:
-        print("ERREUR TG: " + str(e), flush=True)
+        print("ERREUR ALERTE: " + str(e), flush=True)
 
 
 async def run_forever():
     bot = Bot(token=TELEGRAM_TOKEN)
-    print("BOUCLE INFINIE DEMARREE - seuil=" + str(THRESHOLD), flush=True)
+    print("BOUCLE DEMARREE - seuil=" + str(THRESHOLD), flush=True)
 
     while True:
         print("--- Check ---", flush=True)
@@ -338,7 +318,7 @@ async def run_forever():
                 for f in fixtures:
                     fid = f.get("id")
                     minute = get_minute(f)
-                    sc, info_tags, son, sib, cor, dan, tot, minute = momentum(f)
+                    sc, son, sib, cor, dan, tot = momentum(f)
                     h = team_name(f, True)
                     a = team_name(f, False)
                     hg = get_goals(f, True)
@@ -347,7 +327,7 @@ async def run_forever():
                     key = str(fid) + "_" + str(minute // 15)
                     if sc >= THRESHOLD and key not in alerts:
                         alerts[key] = True
-                        await send_alert(bot, f, sc, info_tags, son, sib, cor, dan, tot, minute)
+                        await send_alert(bot, f, sc, son, sib, cor, dan, tot)
                         await asyncio.sleep(2)
 
                 if len(alerts) > 500:
