@@ -30,11 +30,13 @@ LEAGUES = {
 
 THRESHOLD = 50
 INTERVAL = 90
+PRE_MATCH_WINDOW = 30  # minutes avant le match
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream=sys.stdout)
 
 URL = "https://api.sportmonks.com/v3/football"
 alerts = {}
+prematch_sent = {}
 
 
 def get_fixtures():
@@ -55,11 +57,122 @@ def get_fixtures():
         d = r.json()
         all_f = d.get("data", [])
         filtered = [f for f in all_f if f.get("league_id") in LEAGUES]
-        print(str(len(all_f)) + " matchs total, " + str(len(filtered)) + " dans nos ligues", flush=True)
+        print(str(len(all_f)) + " matchs live, " + str(len(filtered)) + " dans nos ligues", flush=True)
         return filtered
     except Exception as e:
-        print("ERREUR API: " + str(e), flush=True)
+        print("ERREUR API live: " + str(e), flush=True)
         return []
+
+
+def get_upcoming_fixtures():
+    """Recupere les matchs a venir dans les 30 prochaines minutes"""
+    try:
+        now = int(time.time())
+        soon = now + (PRE_MATCH_WINDOW * 60)
+        from datetime import datetime, timezone
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        r = requests.get(
+            URL + "/fixtures/date/" + date_str,
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "participants",
+                "per_page": 100
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return []
+        d = r.json()
+        all_f = d.get("data", [])
+        upcoming = []
+        for f in all_f:
+            if f.get("league_id") not in LEAGUES:
+                continue
+            start = f.get("starting_at_timestamp", 0)
+            if start and now < start <= soon:
+                upcoming.append(f)
+        print(str(len(upcoming)) + " match(s) a venir dans 30min", flush=True)
+        return upcoming
+    except Exception as e:
+        print("ERREUR upcoming: " + str(e), flush=True)
+        return []
+
+
+def get_top_scorers(fixture_id, team_id):
+    """Recupere les meilleurs buteurs d'une equipe pour ce match"""
+    try:
+        r = requests.get(
+            URL + "/fixtures/" + str(fixture_id) + "/lineups",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "player.statistics.details.type",
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return []
+        d = r.json()
+        players = d.get("data", [])
+        scorers = []
+        for p in players:
+            if p.get("team_id") != team_id:
+                continue
+            player = p.get("player", {})
+            name = str(player.get("name", ""))
+            if not name:
+                continue
+            season_goals = 0
+            recent_goals = 0
+            stats = player.get("statistics", [])
+            for stat in stats:
+                details = stat.get("details", [])
+                for detail in details:
+                    t = detail.get("type", {})
+                    if isinstance(t, dict) and t.get("code") == "goals":
+                        val = detail.get("data", {}).get("value", 0)
+                        season_goals += int(val) if val else 0
+            if season_goals >= 3:
+                scorers.append({
+                    "name": name,
+                    "season_goals": season_goals,
+                    "recent_goals": recent_goals
+                })
+        scorers.sort(key=lambda x: x["season_goals"], reverse=True)
+        return scorers[:4]
+    except Exception as e:
+        print("ERREUR scorers: " + str(e), flush=True)
+        return []
+
+
+def get_player_recent_form(fixture_id, team_id):
+    """Recupere les joueurs en forme recente via les events des derniers matchs"""
+    try:
+        r = requests.get(
+            URL + "/teams/" + str(team_id) + "/fixtures",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "events.type",
+                "per_page": 5
+            },
+            timeout=15
+        )
+        if r.status_code != 200:
+            return {}
+        d = r.json()
+        recent_matches = d.get("data", [])
+        scorer_recent = {}
+        for match in recent_matches[:3]:
+            events = match.get("events", [])
+            for ev in events:
+                t = ev.get("type", {})
+                if isinstance(t, dict) and "goal" in t.get("code", "").lower():
+                    player_name = str(ev.get("player_name", "") or "")
+                    if player_name:
+                        scorer_recent[player_name] = scorer_recent.get(player_name, 0) + 1
+        return scorer_recent
+    except Exception as e:
+        print("ERREUR recent form: " + str(e), flush=True)
+        return {}
 
 
 def team_name(fixture, home=True):
@@ -73,6 +186,19 @@ def team_name(fixture, home=True):
     except Exception:
         pass
     return "Home" if home else "Away"
+
+
+def get_team_id(fixture, home=True):
+    try:
+        for p in fixture.get("participants", []):
+            loc = p.get("meta", {}).get("location", "")
+            if home and loc == "home":
+                return p.get("id")
+            if not home and loc == "away":
+                return p.get("id")
+    except Exception:
+        pass
+    return None
 
 
 def get_goals(fixture, home=True):
@@ -200,7 +326,84 @@ def momentum(fixture):
     return min(score, 100), son, sib, cor, dan, tot
 
 
-def build_message(fixture, score, son, sib, cor, dan, tot):
+def build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_scorers, h_recent, a_recent):
+    sep = "\u2501" * 20
+
+    h_lines = []
+    for s in h_scorers:
+        name = s["name"]
+        goals = s["season_goals"]
+        line = "  \u2022 " + name + " - " + str(goals) + " buts cette saison"
+        recent = h_recent.get(name, 0)
+        if recent >= 2:
+            line += "\n    \u2705 En feu! A marque lors de ses " + str(recent) + " derniers matchs"
+        elif recent == 1:
+            line += "\n    \u2705 A marque lors de son dernier match"
+        h_lines.append(line)
+
+    a_lines = []
+    for s in a_scorers:
+        name = s["name"]
+        goals = s["season_goals"]
+        line = "  \u2022 " + name + " - " + str(goals) + " buts cette saison"
+        recent = a_recent.get(name, 0)
+        if recent >= 2:
+            line += "\n    \u2705 En feu! A marque lors de ses " + str(recent) + " derniers matchs"
+        elif recent == 1:
+            line += "\n    \u2705 A marque lors de son dernier match"
+        a_lines.append(line)
+
+    h_text = "\n".join(h_lines) if h_lines else "  \u2022 Donnees non disponibles"
+    a_text = "\n".join(a_lines) if a_lines else "  \u2022 Donnees non disponibles"
+
+    # Recommandations buteurs
+    recs = []
+    top_scorers_all = []
+    for s in h_scorers:
+        recent = h_recent.get(s["name"], 0)
+        top_scorers_all.append((s["name"], s["season_goals"], recent))
+    for s in a_scorers:
+        recent = a_recent.get(s["name"], 0)
+        top_scorers_all.append((s["name"], s["season_goals"], recent))
+
+    top_scorers_all.sort(key=lambda x: (x[2] * 10 + x[1]), reverse=True)
+
+    for name, goals, recent in top_scorers_all[:3]:
+        if recent >= 1 and goals >= 4:
+            recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (forme + volume)")
+        elif recent >= 2:
+            recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (en feu en ce moment)")
+        elif goals >= 6:
+            recs.append("  \u2192 \u26bd Anytime scorer: " + name + " (top buteur saison)")
+
+    if not recs:
+        recs.append("  \u2192 \U0001f440 Surveiller les buteurs reguliers de chaque equipe")
+
+    recs_text = "\n".join(recs)
+
+    msg = (
+        "\u26bd PRE-MATCH - BUTEURS A SURVEILLER\n"
+        + sep + "\n"
+        + "\U0001f3c6 " + league + "\n"
+        + "\u2694\ufe0f " + h + " vs " + a + "\n"
+        + "\u23f1\ufe0f Coup d'envoi dans ~" + str(minutes_before) + " min\n"
+        + sep + "\n"
+        + "\U0001f534 " + h + " - Buteurs en forme:\n"
+        + h_text + "\n"
+        + sep + "\n"
+        + "\U0001f535 " + a + " - Buteurs en forme:\n"
+        + a_text + "\n"
+        + sep + "\n"
+        + "\U0001f4a1 QUOI JOUER SUR BETIFY:\n"
+        + recs_text + "\n"
+        + sep + "\n"
+        + "\u26a0\ufe0f Parie de facon responsable"
+    )
+
+    return msg
+
+
+def build_live_message(fixture, score, son, sib, cor, dan, tot):
     minute = get_minute(fixture)
     lid = fixture.get("league_id")
     league = str(LEAGUES.get(lid, "Ligue"))
@@ -271,7 +474,6 @@ def build_message(fixture, score, son, sib, cor, dan, tot):
 
     stats_text = "\n".join(stats_lines) if stats_lines else "  \u2022 Stats en cours"
     recs_text = "\n".join(recs)
-
     sep = "\u2501" * 20
 
     msg = (
@@ -294,15 +496,52 @@ def build_message(fixture, score, son, sib, cor, dan, tot):
     return msg
 
 
-async def send_alert(bot, fixture, score, son, sib, cor, dan, tot):
-    try:
-        msg = build_message(fixture, score, son, sib, cor, dan, tot)
+async def send_prematch_alerts(bot):
+    """Envoie les alertes pre-match pour les matchs a venir"""
+    upcoming = get_upcoming_fixtures()
+    for fixture in upcoming:
+        fid = fixture.get("id")
+        if str(fid) in prematch_sent:
+            continue
+
+        start = fixture.get("starting_at_timestamp", 0)
+        minutes_before = int((start - time.time()) / 60)
+        if minutes_before < 1:
+            continue
+
+        lid = fixture.get("league_id")
+        league = str(LEAGUES.get(lid, "Ligue"))
         h = team_name(fixture, True)
         a = team_name(fixture, False)
-        await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
-        print("Alerte envoyee: " + h + " vs " + a + " score=" + str(score), flush=True)
-    except Exception as e:
-        print("ERREUR ALERTE: " + str(e), flush=True)
+        hid = get_team_id(fixture, True)
+        aid = get_team_id(fixture, False)
+
+        print("Pre-match: " + h + " vs " + a + " dans " + str(minutes_before) + "min", flush=True)
+
+        h_scorers = get_top_scorers(fid, hid) if hid else []
+        a_scorers = get_top_scorers(fid, aid) if aid else []
+        h_recent = get_player_recent_form(fid, hid) if hid else {}
+        a_recent = get_player_recent_form(fid, aid) if aid else {}
+
+        # Filtre: envoie seulement si au moins un buteur notable
+        if not h_scorers and not a_scorers:
+            print("Pas de buteurs notables pour " + h + " vs " + a, flush=True)
+            prematch_sent[str(fid)] = True
+            continue
+
+        try:
+            msg = build_prematch_message(fixture, h, a, league, minutes_before, h_scorers, a_scorers, h_recent, a_recent)
+            await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
+            prematch_sent[str(fid)] = True
+            print("Pre-match envoye: " + h + " vs " + a, flush=True)
+            await asyncio.sleep(2)
+        except Exception as e:
+            print("ERREUR pre-match msg: " + str(e), flush=True)
+
+        if len(prematch_sent) > 200:
+            keys = list(prematch_sent.keys())
+            for k in keys[:100]:
+                del prematch_sent[k]
 
 
 async def run_forever():
@@ -312,9 +551,13 @@ async def run_forever():
     while True:
         print("--- Check ---", flush=True)
         try:
+            # 1. Alertes pre-match
+            await send_prematch_alerts(bot)
+
+            # 2. Alertes live momentum
             fixtures = get_fixtures()
             if not fixtures:
-                print("Aucun match dans nos ligues", flush=True)
+                print("Aucun match live dans nos ligues", flush=True)
             else:
                 for f in fixtures:
                     fid = f.get("id")
@@ -328,7 +571,12 @@ async def run_forever():
                     key = str(fid) + "_" + str(minute // 15)
                     if sc >= THRESHOLD and key not in alerts:
                         alerts[key] = True
-                        await send_alert(bot, f, sc, son, sib, cor, dan, tot)
+                        try:
+                            msg = build_live_message(f, sc, son, sib, cor, dan, tot)
+                            await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
+                            print("Alerte live envoyee: " + h + " vs " + a, flush=True)
+                        except Exception as e:
+                            print("ERREUR live msg: " + str(e), flush=True)
                         await asyncio.sleep(2)
 
                 if len(alerts) > 500:
