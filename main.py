@@ -212,81 +212,83 @@ def build_message(fixture, score, son, sib, cor, dan, tot):
     dominant_team, dominant_side = get_dominant_team(fixture, stats)
     total_goals = hg + ag
 
-    gauge = "X" * int(score / 10) + "." * (10 - int(score / 10))
+    gauge = "\U0001f7e9" * int(score / 10) + "\u2b1c" * (10 - int(score / 10))
 
     if score >= 70:
         lvl = "ALERTE MAX"
-        emoji = "[ROUGE]"
+        emoji = "\U0001f534"
     elif score >= 55:
         lvl = "FORTE PRESSION"
-        emoji = "[ORANGE]"
+        emoji = "\U0001f7e0"
     else:
         lvl = "PRESSION"
-        emoji = "[JAUNE]"
+        emoji = "\U0001f7e1"
 
     stats_lines = []
     if son >= 3:
-        stats_lines.append("  * " + str(int(son)) + " tirs cadres")
+        stats_lines.append("  \u2022 " + str(int(son)) + " tirs cadres")
     if sib >= 3:
-        stats_lines.append("  * " + str(int(sib)) + " tirs dans la surface")
+        stats_lines.append("  \u2022 " + str(int(sib)) + " tirs dans la surface")
     if cor >= 3:
-        stats_lines.append("  * " + str(int(cor)) + " corners")
+        stats_lines.append("  \u2022 " + str(int(cor)) + " corners")
     if dan >= 20:
-        stats_lines.append("  * " + str(int(dan)) + " attaques dangereuses")
+        stats_lines.append("  \u2022 " + str(int(dan)) + " attaques dangereuses")
 
     recs = []
 
     if score >= 55 and (son >= 6 or sib >= 6):
         if dominant_side == "home":
-            recs.append(">> Prochain but: " + h + " (domine)")
+            recs.append("  \u2192 \u26bd Prochain but: " + h + " (domine)")
         elif dominant_side == "away":
-            recs.append(">> Prochain but: " + a + " (domine)")
+            recs.append("  \u2192 \u26bd Prochain but: " + a + " (domine)")
         else:
-            recs.append(">> Prochain but: Match ouvert (les deux peuvent scorer)")
+            recs.append("  \u2192 \u26bd Prochain but: Match ouvert")
 
     if score >= 55 and (son >= 5 or sib >= 5):
-        recs.append(">> Over " + str(total_goals) + ".5 buts dans le match")
+        recs.append("  \u2192 \U0001f4c8 Over " + str(total_goals) + ".5 buts dans le match")
         if minute < 46:
-            recs.append(">> Over 0.5 buts reste 1ere MT")
+            recs.append("  \u2192 \U0001f4c8 Over 0.5 buts reste 1ere MT")
         else:
-            recs.append(">> Over 0.5 buts reste 2eme MT")
+            recs.append("  \u2192 \U0001f4c8 Over 0.5 buts reste 2eme MT")
 
     if cor >= 5:
         next_cor = int(cor) + 2
-        recs.append(">> Plus de corners / Over " + str(next_cor) + ".5 corners")
+        recs.append("  \u2192 \U0001f6a9 Plus de corners / Over " + str(next_cor) + ".5 corners")
 
     if dominant_team and score >= 55:
-        recs.append(">> " + dominant_team + " etouffe l adversaire")
+        recs.append("  \u2192 \U0001f621 " + dominant_team + " etouffe l'adversaire")
 
     if hg == 0 and ag == 0 and score >= 55 and minute >= 30:
-        recs.append(">> BTTS possible - 0-0 sous forte pression")
+        recs.append("  \u2192 \U0001f3af BTTS possible - 0-0 sous forte pression")
     elif total_goals > 0 and (hg == 0 or ag == 0) and score >= 55:
-        recs.append(">> BTTS possible - equipe a 0 sous pression")
+        recs.append("  \u2192 \U0001f3af BTTS possible - equipe a 0 sous pression")
 
     if dan >= 70:
-        recs.append(">> Cartons probables (intensite elevee)")
+        recs.append("  \u2192 \U0001f7e8 Cartons probables (intensite elevee)")
 
     if not recs:
-        recs.append(">> A surveiller - pression en hausse")
+        recs.append("  \u2192 \U0001f440 A surveiller - pression en hausse")
 
-    stats_text = "\n".join(stats_lines) if stats_lines else "  * Stats en cours"
+    stats_text = "\n".join(stats_lines) if stats_lines else "  \u2022 Stats en cours"
     recs_text = "\n".join(recs)
+
+    sep = "\u2501" * 20
 
     msg = (
         emoji + " " + lvl + " - BUT POTENTIEL\n"
-        + "--------------------\n"
-        + "Ligue: " + league + "\n"
-        + "Match: " + h + " " + str(hg) + " - " + str(ag) + " " + a + "\n"
-        + "Minute: " + str(minute) + "' | Score: " + str(score) + "/100\n"
+        + sep + "\n"
+        + "\U0001f3c6 " + league + "\n"
+        + "\u2694\ufe0f  " + h + " " + str(hg) + " - " + str(ag) + " " + a + "\n"
+        + "\u23f1\ufe0f  " + str(minute) + "' | Score momentum: " + str(score) + "/100\n"
         + gauge + "\n"
-        + "--------------------\n"
-        + "STATS:\n"
+        + sep + "\n"
+        + "\U0001f4ca STATS:\n"
         + stats_text + "\n"
-        + "--------------------\n"
-        + "QUOI JOUER SUR BETIFY:\n"
+        + sep + "\n"
+        + "\U0001f4a1 QUOI JOUER SUR BETIFY:\n"
         + recs_text + "\n"
-        + "--------------------\n"
-        + "Parie de facon responsable"
+        + sep + "\n"
+        + "\u26a0\ufe0f Parie de facon responsable"
     )
 
     return msg
