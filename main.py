@@ -29,7 +29,7 @@ LEAGUES = {
 }
 
 THRESHOLD = 50
-INTERVAL = 45          # verifie toutes les 45s au lieu de 90s
+INTERVAL = 45
 PRE_MATCH_WINDOW = 30
 
 logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO, stream=sys.stdout)
@@ -73,7 +73,6 @@ def get_team_id(fixture, home=True):
 
 
 def get_goals_by_team(fixture):
-    """Retourne (buts_home, buts_away) depuis les scores"""
     hg, ag = 0, 0
     try:
         for s in fixture.get("scores", []):
@@ -87,17 +86,14 @@ def get_goals_by_team(fixture):
 
 
 def get_minute(fixture):
-    """Recupere la minute depuis state.clock — le plus fiable"""
     try:
         state = fixture.get("state", {})
         if isinstance(state, dict):
             clock = state.get("clock", {})
             if isinstance(clock, dict):
                 mm = clock.get("mm")
-                ss = clock.get("ss", 0)
                 if mm is not None and int(mm) > 0:
                     return int(mm)
-            # Fallback: state name
             sname = state.get("name", "")
             if "2nd" in sname or "HT" in sname:
                 return 46
@@ -105,7 +101,6 @@ def get_minute(fixture):
                 return 20
     except Exception:
         pass
-    # Dernier recours: timestamp
     try:
         starting = fixture.get("starting_at_timestamp", 0)
         if starting:
@@ -118,7 +113,6 @@ def get_minute(fixture):
 
 
 def stat_val_for_team(stats, code, tid):
-    """Retourne la valeur d'une stat pour une equipe specifique"""
     try:
         for s in stats:
             t = s.get("type", {})
@@ -129,6 +123,10 @@ def stat_val_for_team(stats, code, tid):
     except Exception:
         pass
     return 0.0
+
+
+def get_season_id(fixture):
+    return fixture.get("season_id")
 
 
 # ─────────────────────────────────────────
@@ -236,7 +234,6 @@ def build_form_insights(form, tname, current_goals, minute):
     n = form.get("total_matches", 0)
     if n == 0:
         return insights
-
     unbeaten = form.get("unbeaten", 0)
     wins = form.get("wins", 0)
     always_scored = form.get("always_scored", False)
@@ -248,10 +245,8 @@ def build_form_insights(form, tname, current_goals, minute):
         insights.append("\U0001f525 " + tname + " invaincue sur " + str(n) + " matchs")
     elif wins >= 4:
         insights.append("\U0001f525 " + tname + " " + str(wins) + "V/" + str(n) + " matchs")
-
     if always_scored and n >= 4:
         insights.append("\u26bd " + tname + " a marque dans ses " + str(n) + " derniers matchs")
-
     if minute < 46 and s1h >= int(n * 0.6):
         insights.append("\u23f0 " + tname + " marque souvent en 1MT (" + str(s1h) + "/" + str(n) + ")")
     if minute >= 46 and s2h >= int(n * 0.6):
@@ -260,16 +255,14 @@ def build_form_insights(form, tname, current_goals, minute):
         insights.append("\u23f0 " + tname + " marque souvent en fin de match (" + str(sl15) + "/" + str(n) + ")")
     if current_goals == 0 and always_scored and n >= 3:
         insights.append("\u26a0\ufe0f " + tname + " n'a pas marque - mais marque toujours!")
-
     return insights
 
 
 # ─────────────────────────────────────────
-# BUTEURS VIA TOPSCORERS
+# BUTEURS
 # ─────────────────────────────────────────
 
 def get_top_scorers_for_team(team_id, season_id):
-    """Recupere les top buteurs d'une equipe via l'endpoint topscorers"""
     try:
         r = requests.get(
             URL + "/topscorers/seasons/" + str(season_id),
@@ -300,12 +293,7 @@ def get_top_scorers_for_team(team_id, season_id):
         return []
 
 
-def get_season_id(fixture):
-    return fixture.get("season_id")
-
-
 def get_player_recent_goals(team_id):
-    """Joueurs ayant marque dans les 3 derniers matchs"""
     try:
         r = requests.get(
             URL + "/teams/" + str(team_id) + "/fixtures",
@@ -408,11 +396,29 @@ def get_upcoming_fixtures():
 
 
 # ─────────────────────────────────────────
-# MOMENTUM
+# MOMENTUM + EFFICACITE
 # ─────────────────────────────────────────
 
+def calc_efficiency(son, tot):
+    """
+    Retourne (ratio, label, bonus/malus)
+    ratio = tirs cadres / tirs totaux
+    > 50% = equipe efficace   -> bonus +10
+    30-50% = neutre           -> 0
+    < 30% = equipe inefficace -> malus -8
+    """
+    if tot < 3:
+        return 0.0, "neutre", 0
+    ratio = son / tot
+    if ratio >= 0.50:
+        return ratio, "efficace", 10
+    elif ratio >= 0.30:
+        return ratio, "neutre", 0
+    else:
+        return ratio, "inefficace", -8
+
+
 def momentum(fixture):
-    score = 0
     stats = fixture.get("statistics", [])
     hid = get_team_id(fixture, True)
     aid = get_team_id(fixture, False)
@@ -434,6 +440,9 @@ def momentum(fixture):
     dan = h_dan + a_dan
     tot = h_tot + a_tot
 
+    score = 0
+
+    # Tirs cadres
     if son >= 10:
         score += 25
     elif son >= 6:
@@ -441,6 +450,7 @@ def momentum(fixture):
     elif son >= 3:
         score += 8
 
+    # Tirs dans la surface
     if sib >= 12:
         score += 25
     elif sib >= 7:
@@ -448,6 +458,7 @@ def momentum(fixture):
     elif sib >= 4:
         score += 8
 
+    # Corners
     if cor >= 10:
         score += 15
     elif cor >= 6:
@@ -455,6 +466,7 @@ def momentum(fixture):
     elif cor >= 3:
         score += 4
 
+    # Attaques dangereuses (seuils corriges)
     if dan >= 40:
         score += 20
     elif dan >= 25:
@@ -462,12 +474,28 @@ def momentum(fixture):
     elif dan >= 12:
         score += 6
 
-    if tot > 0 and son / tot >= 0.5:
-        score += 10
+    # Efficacite globale du match
+    h_ratio, h_eff_label, h_bonus = calc_efficiency(h_son, h_tot)
+    a_ratio, a_eff_label, a_bonus = calc_efficiency(a_son, a_tot)
 
-    return (min(score, 100),
-            h_son, a_son, h_sib, a_sib,
-            h_cor, a_cor, h_dan, a_dan)
+    # On prend le bonus/malus de l'equipe dominante (celle qui tire le plus)
+    if h_tot >= a_tot:
+        score += h_bonus
+        dominant_eff = h_eff_label
+        dominant_ratio = h_ratio
+    else:
+        score += a_bonus
+        dominant_eff = a_eff_label
+        dominant_ratio = a_ratio
+
+    return (min(max(score, 0), 100),
+            h_son, a_son,
+            h_sib, a_sib,
+            h_cor, a_cor,
+            h_dan, a_dan,
+            h_tot, a_tot,
+            h_eff_label, a_eff_label,
+            h_ratio, a_ratio)
 
 
 def get_dominant(h_dan, a_dan, h_son, a_son, h_cor, a_cor, hname, aname):
@@ -484,10 +512,24 @@ def get_dominant(h_dan, a_dan, h_son, a_son, h_cor, a_cor, hname, aname):
 # MESSAGES
 # ─────────────────────────────────────────
 
+def eff_emoji(label):
+    if label == "efficace":
+        return " \U0001f3af"   # cible
+    elif label == "inefficace":
+        return " \U0001f4a8"   # nuage (tire dans le vide)
+    return ""
+
+
 def build_live_message(fixture, score,
-                       h_son, a_son, h_sib, a_sib,
-                       h_cor, a_cor, h_dan, a_dan,
+                       h_son, a_son,
+                       h_sib, a_sib,
+                       h_cor, a_cor,
+                       h_dan, a_dan,
+                       h_tot, a_tot,
+                       h_eff, a_eff,
+                       h_ratio, a_ratio,
                        h_form, a_form):
+
     minute = get_minute(fixture)
     lid = fixture.get("league_id")
     league = str(LEAGUES.get(lid, "Ligue"))
@@ -510,28 +552,31 @@ def build_live_message(fixture, score,
         lvl = "PRESSION"
         emoji = "\U0001f7e1"
 
-    # Stats separees par equipe
-    def team_stat_line(tname, son, sib, cor, dan):
-        lines = []
+    # Stats par equipe avec indicateur efficacite
+    def stat_line(tname, son, sib, cor, dan, tot, eff, ratio):
+        parts = []
         if son >= 1:
-            lines.append(str(int(son)) + " tirs cadres")
+            parts.append(str(int(son)) + " tirs cadres")
         if sib >= 1:
-            lines.append(str(int(sib)) + " tirs surface")
+            parts.append(str(int(sib)) + " tirs surface")
         if cor >= 1:
-            lines.append(str(int(cor)) + " corners")
+            parts.append(str(int(cor)) + " corners")
         if dan >= 1:
-            lines.append(str(int(dan)) + " att. dang.")
-        if lines:
-            return "  \U0001f539 " + tname + ": " + " | ".join(lines)
+            parts.append(str(int(dan)) + " att.dang.")
+        eff_str = eff_emoji(eff)
+        pct = str(int(ratio * 100)) + "%" if tot >= 3 else "?"
+        efficacite = " [precision: " + pct + eff_str + "]"
+        if parts:
+            return "  \U0001f539 " + tname + ": " + " | ".join(parts) + efficacite
         return ""
 
-    h_stat = team_stat_line(h, h_son, h_sib, h_cor, h_dan)
-    a_stat = team_stat_line(a, a_son, a_sib, a_cor, a_dan)
+    h_line = stat_line(h, h_son, h_sib, h_cor, h_dan, h_tot, h_eff, h_ratio)
+    a_line = stat_line(a, a_son, a_sib, a_cor, a_dan, a_tot, a_eff, a_ratio)
     stats_text = ""
-    if h_stat:
-        stats_text += h_stat + "\n"
-    if a_stat:
-        stats_text += a_stat
+    if h_line:
+        stats_text += h_line + "\n"
+    if a_line:
+        stats_text += a_line
     if not stats_text:
         stats_text = "  \u2022 Stats en cours"
 
@@ -543,23 +588,40 @@ def build_live_message(fixture, score,
     form_lines.extend(a_insights)
     form_text = "\n".join(["  " + l for l in form_lines]) if form_lines else ""
 
-    # Recommandations (buts uniquement)
+    # Recommandations buts uniquement
     recs = []
+
+    # Contexte efficacite pour les recs
+    if dominant_side == "home":
+        dom_eff = h_eff
+    elif dominant_side == "away":
+        dom_eff = a_eff
+    else:
+        dom_eff = "neutre"
 
     if score >= 55 and (h_son + a_son >= 6 or h_sib + a_sib >= 6):
         if dominant_side == "home":
-            recs.append("  \u2192 \u26bd Prochain but: " + h + " (domine)")
+            if dom_eff == "inefficace":
+                recs.append("  \u2192 \u26bd " + h + " domine mais peu precise - but incertain")
+            else:
+                recs.append("  \u2192 \u26bd Prochain but: " + h + " (domine" + eff_emoji(dom_eff) + ")")
         elif dominant_side == "away":
-            recs.append("  \u2192 \u26bd Prochain but: " + a + " (domine)")
+            if dom_eff == "inefficace":
+                recs.append("  \u2192 \u26bd " + a + " domine mais peu precise - but incertain")
+            else:
+                recs.append("  \u2192 \u26bd Prochain but: " + a + " (domine" + eff_emoji(dom_eff) + ")")
         else:
             recs.append("  \u2192 \u26bd Prochain but: Match ouvert")
 
     if score >= 55 and (h_son + a_son >= 5 or h_sib + a_sib >= 5):
-        recs.append("  \u2192 \U0001f4c8 Over " + str(total_goals) + ".5 buts dans le match")
-        if minute < 46:
-            recs.append("  \u2192 \U0001f4c8 Over 0.5 buts reste 1ere MT")
+        if dom_eff != "inefficace":
+            recs.append("  \u2192 \U0001f4c8 Over " + str(total_goals) + ".5 buts dans le match")
+            if minute < 46:
+                recs.append("  \u2192 \U0001f4c8 Over 0.5 buts reste 1ere MT")
+            else:
+                recs.append("  \u2192 \U0001f4c8 Over 0.5 buts reste 2eme MT")
         else:
-            recs.append("  \u2192 \U0001f4c8 Over 0.5 buts reste 2eme MT")
+            recs.append("  \u2192 \U0001f4c8 Over " + str(total_goals) + ".5 buts possible mais equipe imprecise")
 
     if hg == 0 and ag == 0 and score >= 55 and minute >= 30:
         recs.append("  \u2192 \U0001f3af BTTS possible - 0-0 sous forte pression")
@@ -599,6 +661,7 @@ def build_prematch_message(fixture, h, a, league, minutes_before,
                            h_scorers, a_scorers,
                            h_recent, a_recent,
                            h_form, a_form):
+
     def scorer_lines(scorers, recent):
         lines = []
         for s in scorers:
@@ -613,7 +676,7 @@ def build_prematch_message(fixture, h, a, league, minutes_before,
             lines.append(line)
         return "\n".join(lines) if lines else "  \u2022 Aucun buteur notable"
 
-    def form_lines_for(form, tname):
+    def form_lines_for(form):
         lines = []
         n = form.get("total_matches", 0)
         if n == 0:
@@ -632,10 +695,9 @@ def build_prematch_message(fixture, h, a, league, minutes_before,
 
     h_sc = scorer_lines(h_scorers, h_recent)
     a_sc = scorer_lines(a_scorers, a_recent)
-    h_fm = form_lines_for(h_form, h)
-    a_fm = form_lines_for(a_form, a)
+    h_fm = form_lines_for(h_form)
+    a_fm = form_lines_for(a_form)
 
-    # Recommandations pre-match
     recs = []
     top_all = []
     for s in h_scorers:
@@ -757,12 +819,17 @@ async def run_forever():
                     h_sib, a_sib = result[3], result[4]
                     h_cor, a_cor = result[5], result[6]
                     h_dan, a_dan = result[7], result[8]
+                    h_tot, a_tot = result[9], result[10]
+                    h_eff, a_eff = result[11], result[12]
+                    h_ratio, a_ratio = result[13], result[14]
 
                     h = team_name(f, True)
                     a = team_name(f, False)
                     hg, ag = get_goals_by_team(f)
 
-                    print("[" + str(minute) + "'] " + h + " " + str(hg) + "-" + str(ag) + " " + a + " -> " + str(sc), flush=True)
+                    print("[" + str(minute) + "'] " + h + " " + str(hg) + "-" + str(ag) + " " + a
+                          + " -> " + str(sc)
+                          + " | eff: " + h + "=" + h_eff + " " + a + "=" + a_eff, flush=True)
 
                     key = str(fid) + "_" + str(minute // 15)
                     if sc >= THRESHOLD and key not in alerts:
@@ -777,6 +844,9 @@ async def run_forever():
                                                      h_sib, a_sib,
                                                      h_cor, a_cor,
                                                      h_dan, a_dan,
+                                                     h_tot, a_tot,
+                                                     h_eff, a_eff,
+                                                     h_ratio, a_ratio,
                                                      h_form, a_form)
                             await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
                             print("Alerte envoyee: " + h + " vs " + a + " [" + str(minute) + "'] score=" + str(sc), flush=True)
