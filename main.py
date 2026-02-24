@@ -144,7 +144,7 @@ def get_smart_threshold(minute, hg, ag, h_eff, a_eff):
     - Equipe inefficace : seuil plus haut pour eviter les fausses alertes
     - En debut de match : seuil plus haut car les stats sont trop faibles
     """
-    base = 55  # seuil de base plus strict que 50
+    base = 48  # seuil calibre
 
     # Ajustement par minute
     if minute >= 80:
@@ -153,8 +153,8 @@ def get_smart_threshold(minute, hg, ag, h_eff, a_eff):
         base -= 8
     elif minute >= 55:
         base -= 4
-    elif minute < 20:
-        base += 10   # trop tot, stats insuffisantes
+    elif minute < 15:
+        base += 8
 
     # Equipe qui cherche a egaliser ou renverser
     total = hg + ag
@@ -166,9 +166,9 @@ def get_smart_threshold(minute, hg, ag, h_eff, a_eff):
     # Penalite si equipe dominante est inefficace
     dom_eff = h_eff if hg <= ag else a_eff
     if dom_eff == "inefficace":
-        base += 8    # equipe qui tire a cote -> fausse alerte probable
+        base += 6
 
-    return max(40, min(base, 75))
+    return max(38, min(base, 70))
 
 
 # ─────────────────────────────────────────
@@ -423,32 +423,118 @@ def build_form_insights(form, tname, current_goals, minute):
 # ─────────────────────────────────────────
 
 def get_top_scorers_for_team(team_id, season_id):
+    """
+    Essaie plusieurs endpoints pour trouver les buteurs.
+    1. topscorers/seasons/{season_id} si season_id dispo
+    2. players via squads avec stats
+    3. events des derniers matchs comme fallback
+    """
+    scorers = []
+
+    # Methode 1: topscorers par saison
+    if season_id:
+        try:
+            r = requests.get(
+                URL + "/topscorers/seasons/" + str(season_id),
+                params={
+                    "api_token": SPORTMONKS_TOKEN,
+                    "include": "player",
+                    "per_page": 100
+                },
+                timeout=15
+            )
+            if r.status_code == 200:
+                for s in r.json().get("data", []):
+                    if s.get("participant_id") != team_id:
+                        continue
+                    player = s.get("player", {})
+                    name = str(player.get("name", "") or player.get("display_name", ""))
+                    goals = int(s.get("total", 0) or 0)
+                    if name and goals >= 2:
+                        scorers.append({"name": name, "season_goals": goals})
+                if scorers:
+                    scorers.sort(key=lambda x: x["season_goals"], reverse=True)
+                    print("Buteurs via topscorers: " + str(len(scorers)), flush=True)
+                    return scorers[:4]
+        except Exception as e:
+            print("ERREUR topscorers method1: " + str(e), flush=True)
+
+    # Methode 2: squad avec statistiques joueurs
     try:
         r = requests.get(
-            URL + "/topscorers/seasons/" + str(season_id),
+            URL + "/teams/" + str(team_id) + "/players",
             params={
                 "api_token": SPORTMONKS_TOKEN,
-                "include": "player;participant",
-                "per_page": 50
+                "include": "statistics.details.type",
+                "per_page": 30
             },
             timeout=15
         )
-        if r.status_code != 200:
-            return []
-        scorers = []
-        for s in r.json().get("data", []):
-            if s.get("participant_id") != team_id:
-                continue
-            player = s.get("player", {})
-            name = str(player.get("name", "") or player.get("display_name", ""))
-            goals = int(s.get("total", 0) or 0)
-            if name and goals >= 2:
-                scorers.append({"name": name, "season_goals": goals})
-        scorers.sort(key=lambda x: x["season_goals"], reverse=True)
-        return scorers[:4]
+        if r.status_code == 200:
+            for p in r.json().get("data", []):
+                player = p.get("player", p)
+                name = str(player.get("name", "") or player.get("display_name", ""))
+                if not name:
+                    name = str(p.get("name", "") or p.get("display_name", ""))
+                goals = 0
+                for stat in p.get("statistics", []):
+                    for detail in stat.get("details", []):
+                        t = detail.get("type", {})
+                        if isinstance(t, dict) and t.get("code") in ("goals", "goals-scored"):
+                            val = detail.get("data", {}).get("value", 0)
+                            goals += int(val) if val else 0
+                if name and goals >= 2:
+                    scorers.append({"name": name, "season_goals": goals})
+            if scorers:
+                scorers.sort(key=lambda x: x["season_goals"], reverse=True)
+                print("Buteurs via squad stats: " + str(len(scorers)), flush=True)
+                return scorers[:4]
     except Exception as e:
-        print("ERREUR topscorers: " + str(e), flush=True)
-        return []
+        print("ERREUR topscorers method2: " + str(e), flush=True)
+
+    # Methode 3: events des 10 derniers matchs pour trouver buteurs recurrents
+    try:
+        r = requests.get(
+            URL + "/teams/" + str(team_id) + "/fixtures",
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "events.type;events.player",
+                "per_page": 10,
+                "sort": "-starting_at"
+            },
+            timeout=15
+        )
+        if r.status_code == 200:
+            goal_count = {}
+            for match in r.json().get("data", []):
+                for ev in match.get("events", []):
+                    t = ev.get("type", {})
+                    code = t.get("code", "") if isinstance(t, dict) else ""
+                    if "goal" not in code.lower() or "own" in code.lower():
+                        continue
+                    ev_team = ev.get("participant_id") or ev.get("team_id")
+                    if ev_team != team_id:
+                        continue
+                    pname = str(ev.get("player_name", "") or "")
+                    if not pname:
+                        pl = ev.get("player", {})
+                        if isinstance(pl, dict):
+                            pname = str(pl.get("name", "") or pl.get("display_name", "") or "")
+                    if pname:
+                        goal_count[pname] = goal_count.get(pname, 0) + 1
+
+            for name, goals in goal_count.items():
+                if goals >= 1:
+                    scorers.append({"name": name, "season_goals": goals})
+            if scorers:
+                scorers.sort(key=lambda x: x["season_goals"], reverse=True)
+                print("Buteurs via events: " + str(len(scorers)), flush=True)
+                return scorers[:4]
+    except Exception as e:
+        print("ERREUR topscorers method3: " + str(e), flush=True)
+
+    print("Aucun buteur trouve pour team_id=" + str(team_id), flush=True)
+    return []
 
 
 def get_player_recent_goals(team_id):
@@ -494,13 +580,34 @@ def get_player_recent_goals(team_id):
 # FIXTURES
 # ─────────────────────────────────────────
 
+def get_fixture_details(fixture_id):
+    """Recupere les stats et events d'un match specifique via son ID"""
+    try:
+        r = requests.get(
+            URL + "/fixtures/" + str(fixture_id),
+            params={
+                "api_token": SPORTMONKS_TOKEN,
+                "include": "statistics.type;events.type"
+            },
+            timeout=15
+        )
+        if r.status_code == 200:
+            data = r.json().get("data", {})
+            return (data.get("statistics", []),
+                    data.get("events", []))
+    except Exception as e:
+        print("ERREUR fixture details: " + str(e), flush=True)
+    return [], []
+
+
 def get_fixtures():
     try:
+        # Etape 1: recupere les matchs live avec infos de base
         r = requests.get(
             URL + "/livescores/inplay",
             params={
                 "api_token": SPORTMONKS_TOKEN,
-                "include": "participants;scores;state;statistics.type;events.type",
+                "include": "participants;scores;state",
                 "per_page": 50
             },
             timeout=15
@@ -511,7 +618,21 @@ def get_fixtures():
         all_f = r.json().get("data", [])
         filtered = [f for f in all_f if f.get("league_id") in LEAGUES]
         print(str(len(all_f)) + " live, " + str(len(filtered)) + " dans nos ligues", flush=True)
-        return filtered
+
+        # Etape 2: pour chaque match dans nos ligues, recupere stats + events separement
+        enriched = []
+        for f in filtered:
+            fid = f.get("id")
+            stats, events = get_fixture_details(fid)
+            f["statistics"] = stats
+            f["events"] = events
+            if stats:
+                print("Stats OK pour " + str(fid) + ": " + str(len(stats)) + " entrees", flush=True)
+            else:
+                print("Stats VIDES pour " + str(fid), flush=True)
+            enriched.append(f)
+
+        return enriched
     except Exception as e:
         print("ERREUR API: " + str(e), flush=True)
         return []
