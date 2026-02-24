@@ -75,40 +75,67 @@ def get_team_id(fixture, home=True):
 def get_goals_by_team(fixture):
     hg, ag = 0, 0
     try:
+        # Essaie CURRENT en premier
         for s in fixture.get("scores", []):
             if s.get("description") == "CURRENT":
                 sd = s.get("score", {})
                 hg = int(sd.get("goals", 0) or 0)
                 ag = int(sd.get("participant", 0) or 0)
+                return hg, ag
+        # Fallback sur autres descriptions live
+        for s in fixture.get("scores", []):
+            desc = s.get("description", "")
+            if desc in ("LIVE", "2ND_HALF", "1ST_HALF", "HT"):
+                sd = s.get("score", {})
+                hg = int(sd.get("goals", 0) or 0)
+                ag = int(sd.get("participant", 0) or 0)
+                return hg, ag
     except Exception:
         pass
     return hg, ag
 
 
 def get_minute(fixture):
+    """
+    Priorite: timestamp reel (toujours juste) > state.clock > state.name
+    state.clock reste bloque a 46 en debut de 2eme MT sur SportMonks
+    """
+    # Methode 1: timestamp (la plus fiable)
+    try:
+        starting = fixture.get("starting_at_timestamp", 0)
+        if starting and starting > 0:
+            elapsed = int((time.time() - starting) / 60)
+            if 1 <= elapsed <= 130:
+                return elapsed
+    except Exception:
+        pass
+
+    # Methode 2: state.clock uniquement si > 46
     try:
         state = fixture.get("state", {})
         if isinstance(state, dict):
             clock = state.get("clock", {})
             if isinstance(clock, dict):
                 mm = clock.get("mm")
-                if mm is not None and int(mm) > 0:
+                if mm is not None and int(mm) > 46:
                     return int(mm)
-            sname = state.get("name", "")
-            if "2nd" in sname:
-                return 46
-            if "1st" in sname:
-                return 20
     except Exception:
         pass
+
+    # Methode 3: nom du state
     try:
-        starting = fixture.get("starting_at_timestamp", 0)
-        if starting:
-            elapsed = int((time.time() - starting) / 60)
-            if 1 <= elapsed <= 130:
-                return elapsed
+        state = fixture.get("state", {})
+        if isinstance(state, dict):
+            sname = str(state.get("name", "")).lower()
+            if "2nd" in sname:
+                return 55
+            if "ht" in sname or "half" in sname:
+                return 45
+            if "1st" in sname:
+                return 25
     except Exception:
         pass
+
     return 0
 
 
