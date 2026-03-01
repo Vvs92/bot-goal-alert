@@ -77,20 +77,48 @@ print("=" * 45, flush=True)
 
 # Ligues suivies (IDs API-Football)
 LEAGUES = {
+    # ── Coupes UEFA ─────────────────────────────────
     2:   "Champions League",
     3:   "Europa League",
     848: "Conference League",
+
+    # ── Angleterre ──────────────────────────────────
     39:  "Premier League",
-    140: "La Liga",
-    135: "Serie A",
-    78:  "Bundesliga",
-    61:  "Ligue 1",
-    79:  "Bundesliga 2",
     40:  "Championship",
-    88:  "Eredivisie",
-    203: "Super Lig",
+    45:  "FA Cup",
+    46:  "EFL Cup (Carabao Cup)",
+
+    # ── Espagne ─────────────────────────────────────
+    140: "La Liga",
+    143: "Copa del Rey",
+
+    # ── Italie ──────────────────────────────────────
+    135: "Serie A",
+    136: "Serie B",
+    137: "Coppa Italia",
+
+    # ── Allemagne ───────────────────────────────────
+    78:  "Bundesliga",
+    79:  "Bundesliga 2",
+    81:  "DFB Pokal",
+
+    # ── France ──────────────────────────────────────
+    61:  "Ligue 1",
+    66:  "Coupe de France",
+
+    # ── Belgique ────────────────────────────────────
     144: "Belgian Pro League",
-    179: "Premiership (Ecosse)",
+    147: "Coupe de Belgique",
+
+    # ── Pays-Bas ────────────────────────────────────
+    88:  "Eredivisie",
+    89:  "Eerste Divisie",
+
+    # ── Autres ligues ───────────────────────────────
+    203: "Super Lig (Turquie)",
+    119: "Danish Superliga",
+    307: "Saudi Pro League",
+    253: "MLS",
 }
 
 # Caches
