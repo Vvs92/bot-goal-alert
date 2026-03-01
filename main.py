@@ -1,540 +1,649 @@
 """
-╔══════════════════════════════════════════════════════╗
-║   BOT TELEGRAM - ALERTES BUTS FOOTBALL               ║
-║   API : api-football v3 (api-sports.io) - GRATUIT    ║
-║   Structure JSON confirmée doc officielle             ║
-╚══════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║   BOT TELEGRAM - ALERTES FOOTBALL PREMIUM                    ║
+║   API : Bzzoiro Sports Data (sports.bzzoiro.com)             ║
+║   100% gratuit · Illimite · ML CatBoost · xG · Cotes live   ║
+╚══════════════════════════════════════════════════════════════╝
 
-Structure API-Football v3 (confirmee) :
-  GET /fixtures?live=all
-  response[i] = {
-    fixture: { id, status: { elapsed, short }, timestamp },
-    league:  { id, name },
-    teams:   { home: { id, name }, away: { id, name } },
-    goals:   { home: int|null, away: int|null },
+VARIABLES RAILWAY :
+  BZZOIRO_KEY      → ta cle API Bzzoiro (register sur sports.bzzoiro.com)
+  TELEGRAM_TOKEN   → token bot Telegram (@BotFather)
+  TELEGRAM_CHAT_ID → ton chat ID (@userinfobot)
+
+STRUCTURE API BZZOIRO CONFIRMEE (doc officielle) :
+
+  GET /api/live/
+  Authorization: Token KEY
+  → { count: int, results: [ LiveMatch, ... ] }
+
+  LiveMatch : {
+    id           : int,
+    home_team    : str,
+    away_team    : str,
+    home_score   : int|null,
+    away_score   : int|null,
+    minute       : int|null,
+    status       : "live"|"finished"|"notstarted",
+    league       : { id: int, name: str, country: str },
+    statistics   : {
+        home: { shots_on_goal, shots_insidebox, shots_total,
+                corners, ball_possession, saves,
+                dangerous_attacks, fouls, offsides },
+        away: { ... }
+    },
+    incidents    : [
+        { type: "goal"|"card"|"substitution",
+          team: "home"|"away",
+          minute: int,
+          player: str,
+          detail: str }
+    ]
   }
 
-  GET /fixtures/statistics?fixture=ID
-  response[i] = {
-    team: { id, name },
-    statistics: [ { type: "Shots on Goal", value: int|null }, ... ]
-  }
-  Types dispo: "Shots on Goal", "Shots off Goal", "Shots insidebox",
-               "Total Shots", "Blocked Shots", "Corner Kicks",
-               "Ball Possession", "Goalkeeper Saves", "expected_goals"
+  GET /api/predictions/?event=ID
+  → { count, results: [ {
+      prob_home_win, prob_draw, prob_away_win,
+      prob_over_15, prob_over_25, prob_over_35,
+      prob_btts_yes, prob_btts_no,
+      predicted_result: "H"|"D"|"A",
+      confidence: float (0-100),
+      expected_goals_home: float,
+      expected_goals_away: float,
+      most_likely_score: str   (ex: "2-1")
+  } ] }
 
-  GET /fixtures/events?fixture=ID
-  response[i] = {
-    time:   { elapsed, extra },
-    team:   { id, name },
-    player: { id, name },
-    type:   "Goal"|"Card"|"subst"|"Var",
-    detail: "Normal Goal"|"Penalty"|"Own Goal"|...
-  }
+  GET /api/events/?status=live
+  → meme structure mais sans stats live (utiliser /api/live/)
 
-  GET /teams/statistics?league=X&season=Y&team=Z
-  response = {
-    form: "WWDLW...",
-    goals: { for: { total: {total}, minute: {"0-15":{total,percentage},...} } }
-    fixtures: { played:{total}, wins:{total}, draws:{total}, loses:{total} }
-  }
-
-COMPTAGE REQUETES (plan gratuit = 100/jour) :
-  - 1 appel /fixtures?live=all toutes les 45s
-  - /statistics + /events par match live (cache 30s)
-  - /teams/statistics par equipe (cache 1h)
-  Total soiree chargee : ~60-80 requetes OK
+  Cotes sur /api/events/ dans chaque evenement :
+  odds: { home: float, draw: float, away: float,
+          over_15: float, under_15: float,
+          over_25: float, under_25: float,
+          over_35: float, under_35: float,
+          btts_yes: float, btts_no: float }
 """
 
-import requests
 import os
-import asyncio
 import time
+import json
+import asyncio
 import traceback
+import requests
+from datetime import datetime
 from telegram import Bot
 
-# ═══════════════════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
 
-API_KEY          = os.environ.get("APIFOOTBALL_KEY", "")
+BZZOIRO_KEY      = os.environ.get("BZZOIRO_KEY", "")
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-BASE_URL = "https://v3.football.api-sports.io"
-HEADERS  = {
-    "x-rapidapi-host": "v3.football.api-sports.io",
-    "x-rapidapi-key":  API_KEY
+BASE_URL  = "https://sports.bzzoiro.com"
+HEADERS   = {"Authorization": "Token " + BZZOIRO_KEY}
+
+INTERVAL  = 45    # secondes entre chaque cycle
+SEP       = "\u2501" * 22
+
+print("=" * 55, flush=True)
+print("  BOT FOOTBALL PREMIUM v7 - Bzzoiro API", flush=True)
+print("  " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"), flush=True)
+print("=" * 55, flush=True)
+
+# ── Ligues Bzzoiro (IDs confirmes sur sports.bzzoiro.com/leagues/) ──
+WATCHED_LEAGUES = {
+    1:  "Premier League",
+    3:  "La Liga",
+    4:  "Serie A",
+    5:  "Bundesliga",
+    6:  "Ligue 1",
+    7:  "Champions League",
+    8:  "Europa League",
+    10: "Eredivisie",
+    11: "Trendyol Super Lig",
+    12: "Championship",
+    14: "Belgian Pro League",
+    17: "Saudi Pro League",
+    18: "MLS",
+    # Ligues bonus disponibles sur Bzzoiro
+    2:  "Liga Portugal",
+    9:  "Brasileirao Serie A",
+    15: "Super League (Suisse)",
+    19: "Liga MX",
 }
 
-INTERVAL       = 45
-CURRENT_SEASON = 2024
-SEP            = "\u2501" * 22
-
-print("=" * 45, flush=True)
-print("  BOT ALERTES FOOTBALL v6 - API-Football", flush=True)
-print("=" * 45, flush=True)
-
-# Ligues suivies (IDs API-Football)
-LEAGUES = {
-    # ── Coupes UEFA ─────────────────────────────────
-    2:   "Champions League",
-    3:   "Europa League",
-    848: "Conference League",
-
-    # ── Angleterre ──────────────────────────────────
-    39:  "Premier League",
-    40:  "Championship",
-    45:  "FA Cup",
-    46:  "EFL Cup (Carabao Cup)",
-
-    # ── Espagne ─────────────────────────────────────
-    140: "La Liga",
-    143: "Copa del Rey",
-
-    # ── Italie ──────────────────────────────────────
-    135: "Serie A",
-    136: "Serie B",
-    137: "Coppa Italia",
-
-    # ── Allemagne ───────────────────────────────────
-    78:  "Bundesliga",
-    79:  "Bundesliga 2",
-    81:  "DFB Pokal",
-
-    # ── France ──────────────────────────────────────
-    61:  "Ligue 1",
-    66:  "Coupe de France",
-
-    # ── Belgique ────────────────────────────────────
-    144: "Belgian Pro League",
-    147: "Coupe de Belgique",
-
-    # ── Pays-Bas ────────────────────────────────────
-    88:  "Eredivisie",
-    89:  "Eerste Divisie",
-
-    # ── Autres ligues ───────────────────────────────
-    203: "Super Lig (Turquie)",
-    119: "Danish Superliga",
-    307: "Saudi Pro League",
-    253: "MLS",
-}
-
-# Caches
-alerts_sent = {}
-form_cache  = {}
-stats_cache = {}
-req_count   = {"today": 0, "date": ""}
+# ── Caches ─────────────────────────────────────────────────────
+alerts_sent   = {}   # "event_id_window" → True
+pred_cache    = {}   # event_id → (ts, pred_dict)
+live_cache    = {}   # "all" → (ts, list_matches)
+discovery_done = False   # log structure JSON une seule fois
 
 
-# ═══════════════════════════════════════════════════════
-# COMPTEUR + APPEL API
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# APPELS API - robuste
+# ═══════════════════════════════════════════════════════════════
 
-def count_req():
-    from datetime import date
-    today = str(date.today())
-    if req_count["date"] != today:
-        req_count["date"]  = today
-        req_count["today"] = 0
-    req_count["today"] += 1
-    print("  [API] req today: " + str(req_count["today"]) + "/100", flush=True)
-
-
-def api_get(endpoint, params=None):
+def api_get(endpoint, params=None, timeout=15):
+    """
+    Appel API Bzzoiro.
+    Retourne le JSON complet (pas seulement 'results')
+    pour pouvoir acceder a tous les champs.
+    """
     try:
         r = requests.get(
             BASE_URL + endpoint,
             headers=HEADERS,
             params=params or {},
-            timeout=12
+            timeout=timeout
         )
-        count_req()
+        if r.status_code == 401:
+            print("  [API] 401 - Cle BZZOIRO_KEY invalide", flush=True)
+            return None
         if r.status_code == 429:
-            print("  [RATE LIMIT] Pause 60s", flush=True)
-            time.sleep(60)
+            print("  [API] Rate limit - pause 30s", flush=True)
+            time.sleep(30)
             return None
         if r.status_code != 200:
-            print("  [API] " + str(r.status_code) + " sur " + endpoint, flush=True)
+            print("  [API] HTTP " + str(r.status_code) + " " + endpoint, flush=True)
             return None
-        data   = r.json()
-        errors = data.get("errors", {})
-        if errors and errors != [] and errors != {}:
-            print("  [API] Erreur: " + str(errors), flush=True)
-            return None
-        return data.get("response", [])
+        return r.json()
+    except requests.exceptions.Timeout:
+        print("  [API] Timeout " + endpoint, flush=True)
+        return None
+    except requests.exceptions.ConnectionError:
+        print("  [API] Connexion impossible", flush=True)
+        return None
     except Exception as e:
         print("  [API] Exception: " + str(e), flush=True)
         return None
 
 
-# ═══════════════════════════════════════════════════════
-# DONNEES LIVE
-# ═══════════════════════════════════════════════════════
+def log_structure(data, label="STRUCTURE"):
+    """
+    Log la structure JSON recue au 1er appel.
+    Permet de verifier en production que les champs sont corrects.
+    """
+    global discovery_done
+    if discovery_done:
+        return
+    try:
+        results = data.get("results", [])
+        if results:
+            sample = results[0]
+            print("\n  [DISCOVERY] " + label + ":", flush=True)
+            print("  Champs top-level: " + str(list(sample.keys())), flush=True)
+            if "statistics" in sample:
+                stats = sample["statistics"]
+                if isinstance(stats, dict):
+                    home_keys = list(stats.get("home", {}).keys())
+                    print("  statistics.home keys: " + str(home_keys), flush=True)
+            if "incidents" in sample and sample["incidents"]:
+                inc = sample["incidents"][0]
+                print("  incidents[0] keys: " + str(list(inc.keys())), flush=True)
+            if "odds" in sample:
+                print("  odds keys: " + str(list(sample["odds"].keys())), flush=True)
+            print("  [DISCOVERY] FIN\n", flush=True)
+        discovery_done = True
+    except Exception as e:
+        print("  [DISCOVERY] Erreur: " + str(e), flush=True)
 
-def get_live_fixtures():
+
+# ═══════════════════════════════════════════════════════════════
+# RECUPERATION DES MATCHS LIVE
+# ═══════════════════════════════════════════════════════════════
+
+def get_live_matches():
     """
-    GET /fixtures?live=all
-    Structure reponse confirmee :
-      fixture.id, fixture.status.{elapsed, short}, fixture.timestamp
-      league.{id, name}
-      teams.{home, away}.{id, name}
-      goals.{home, away} -> int ou null
+    GET /api/live/
+    Cache 30s pour eviter appels inutiles entre les cycles de 45s.
+    Filtre sur nos ligues.
     """
-    data = api_get("/fixtures", {"live": "all"})
+    key = "all"
+    if key in live_cache:
+        ts, cached = live_cache[key]
+        if time.time() - ts < 30:
+            return cached
+
+    data = api_get("/api/live/")
     if not data:
         return []
-    filtered = [f for f in data if f.get("league", {}).get("id") in LEAGUES]
-    print("  [LIVE] " + str(len(data)) + " total, " + str(len(filtered)) + " nos ligues", flush=True)
+
+    # Log structure au 1er appel
+    log_structure(data, "LIVE")
+
+    results  = data.get("results", [])
+    filtered = []
+    for m in results:
+        lid = None
+        league_obj = m.get("league")
+        if isinstance(league_obj, dict):
+            lid = league_obj.get("id")
+        elif isinstance(league_obj, int):
+            lid = league_obj
+        if lid in WATCHED_LEAGUES:
+            filtered.append(m)
+
+    live_cache[key] = (time.time(), filtered)
+    total = len(results)
+    print("  [LIVE] " + str(total) + " matchs, "
+          + str(len(filtered)) + " dans nos ligues", flush=True)
     return filtered
 
 
-def get_fixture_stats_and_events(fixture_id):
-    """
-    Stats: GET /fixtures/statistics?fixture=ID
-    Events: GET /fixtures/events?fixture=ID
-    Cache 30s pour eviter appels inutiles.
-    """
-    key = str(fixture_id)
-    if key in stats_cache:
-        ts, stats, events = stats_cache[key]
-        if time.time() - ts < 30:
-            return stats, events
+# ═══════════════════════════════════════════════════════════════
+# PREDICTIONS ML
+# ═══════════════════════════════════════════════════════════════
 
-    stats  = api_get("/fixtures/statistics", {"fixture": fixture_id}) or []
-    events = api_get("/fixtures/events",     {"fixture": fixture_id}) or []
-    stats_cache[key] = (time.time(), stats, events)
-    return stats, events
-
-
-def extract_stat(stats_resp, team_id, stat_type):
+def get_prediction(event_id):
     """
-    Extrait valeur d'une stat pour une equipe.
-    stats_resp = [{team:{id}, statistics:[{type, value}]}, ...]
+    GET /api/predictions/?event=ID
+    Cache 10 min (les predictions ML ne changent pas souvent).
     """
-    for block in stats_resp:
-        if block.get("team", {}).get("id") != team_id:
-            continue
-        for s in block.get("statistics", []):
-            if s.get("type") != stat_type:
-                continue
-            val = s.get("value")
-            if val is None:
-                return 0.0
-            if isinstance(val, str):
-                val = val.replace("%", "").strip()
-            try:
-                return float(val)
-            except (ValueError, TypeError):
-                return 0.0
-    return 0.0
+    key = str(event_id)
+    if key in pred_cache:
+        ts, pred = pred_cache[key]
+        if time.time() - ts < 600:
+            return pred
+
+    data = api_get("/api/predictions/", {"event": event_id})
+    if not data:
+        pred_cache[key] = (time.time(), {})
+        return {}
+
+    results = data.get("results", [])
+    pred    = results[0] if results else {}
+    pred_cache[key] = (time.time(), pred)
+    return pred
 
 
-def get_minute(fixture):
-    """
-    fixture.status.elapsed = minute cumulative du match (int).
-    C'est le champ officiel API-Football pour la minute.
-    """
+# ═══════════════════════════════════════════════════════════════
+# EXTRACTION SECURISEE DES DONNEES
+# ═══════════════════════════════════════════════════════════════
+
+def safe_float(val, default=0.0):
+    """Convertit une valeur en float de facon securisee."""
+    if val is None:
+        return default
+    if isinstance(val, str):
+        val = val.replace("%", "").replace(",", ".").strip()
+        if not val:
+            return default
     try:
-        elapsed = fixture.get("fixture", {}).get("status", {}).get("elapsed")
-        if elapsed is not None and int(elapsed) > 0:
-            return int(elapsed)
-    except Exception:
-        pass
-    try:
-        ts = fixture.get("fixture", {}).get("timestamp", 0)
-        if ts and ts > 0:
-            e = int((time.time() - ts) / 60)
-            if 1 <= e <= 130:
-                return e
-    except Exception:
-        pass
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def get_score(match):
+    """Score du match. home_score/away_score -> int, null = 0."""
+    hg = match.get("home_score")
+    ag = match.get("away_score")
+    return (int(hg) if hg is not None else 0,
+            int(ag) if ag is not None else 0)
+
+
+def get_minute(match):
+    """Minute actuelle. Champ 'minute' de l'API Bzzoiro."""
+    m = match.get("minute")
+    if m is not None:
+        try:
+            v = int(m)
+            if 1 <= v <= 130:
+                return v
+        except (ValueError, TypeError):
+            pass
     return 0
 
 
-def get_score(fixture):
+def get_stat(match, side, key):
     """
-    goals.home / goals.away -> int ou null -> 0 si null.
-    Structure la plus simple et fiable de l'API.
+    Extrait stat depuis match.statistics.home/away.
+    Gere les cas: statistics absent, side absent, valeur null/str.
     """
-    try:
-        g  = fixture.get("goals", {})
-        hg = g.get("home")
-        ag = g.get("away")
-        return (int(hg) if hg is not None else 0,
-                int(ag) if ag is not None else 0)
-    except Exception:
-        return 0, 0
+    stats = match.get("statistics")
+    if not isinstance(stats, dict):
+        return 0.0
+    side_data = stats.get(side)
+    if not isinstance(side_data, dict):
+        return 0.0
+    return safe_float(side_data.get(key))
 
 
-# ═══════════════════════════════════════════════════════
-# FORME DES EQUIPES - cache 1h
-# ═══════════════════════════════════════════════════════
-
-def get_team_form(team_id, league_id):
+def get_odds_from_match(match):
     """
-    GET /teams/statistics?league=X&season=Y&team=Z
-    Retourne directement un objet (pas une liste).
-    Champs utiles:
-      form: "WWDLW" (derniers matchs)
-      goals.for.minute: {"0-15":{total,percentage}, "16-30":..., "76-90":...}
-      goals.for.total.total: int
-      goals.against.total.total: int
-      fixtures.played.total: int
+    Cotes depuis le champ 'odds' si present dans le match.
+    Structure: { home, draw, away, over_25, under_25, btts_yes, btts_no }
     """
-    key = str(team_id)
-    if key in form_cache:
-        ts, data = form_cache[key]
-        if time.time() - ts < 3600:
-            return data
-
-    result = api_get("/teams/statistics", {
-        "league": league_id,
-        "season": CURRENT_SEASON,
-        "team":   team_id
-    })
-
-    # /teams/statistics retourne un objet unique, pas une liste
-    stat = {}
-    if isinstance(result, dict):
-        stat = result
-    elif isinstance(result, list) and result:
-        stat = result[0]
-
-    form_cache[key] = (time.time(), stat)
-    return stat
+    odds = match.get("odds")
+    if not isinstance(odds, dict):
+        return {}
+    return {k: safe_float(v) for k, v in odds.items()}
 
 
-def parse_form_insights(form_data, tname, minute, current_goals):
-    if not form_data:
-        return []
-    insights = []
-
-    # Forme "WWDLW"
-    form_str = str(form_data.get("form") or "")
-    last5    = form_str[-5:]
-    wins     = last5.count("W")
-    draws    = last5.count("D")
-    losses   = last5.count("L")
-
-    if wins >= 4:
-        insights.append("\U0001f525 " + tname + " en grande forme (" + str(wins) + "V/" + str(len(last5)) + ")")
-    elif wins <= 1 and losses >= 3:
-        insights.append("\U0001f4c9 " + tname + " en difficulte (" + str(losses) + "D sur 5)")
-
-    # Buts par tranche horaire
-    goals_min = form_data.get("goals", {}).get("for", {}).get("minute", {})
-    if goals_min:
-        late_pct = 0.0
-        for slot in ["76-90", "91-105"]:
-            try:
-                p = goals_min.get(slot, {}).get("percentage") or "0"
-                late_pct += float(str(p).replace("%", ""))
-            except Exception:
-                pass
-        early_pct = 0.0
-        for slot in ["0-15", "16-30"]:
-            try:
-                p = goals_min.get(slot, {}).get("percentage") or "0"
-                early_pct += float(str(p).replace("%", ""))
-            except Exception:
-                pass
-        if minute >= 70 and late_pct >= 25:
-            insights.append("\u23f0 " + tname + " marque souvent en fin de match (" + str(int(late_pct)) + "% de ses buts)")
-        if minute < 35 and early_pct >= 30:
-            insights.append("\u23f0 " + tname + " marque souvent en debut de match (" + str(int(early_pct)) + "%)")
-
-    # Buts encaisses
-    played = (form_data.get("fixtures", {}).get("played", {}) or {}).get("total") or 0
-    ga_tot = (form_data.get("goals", {}).get("against", {}).get("total", {}) or {}).get("total") or 0
-    if played >= 5 and ga_tot / played < 0.8:
-        insights.append("\U0001f6e1\ufe0f " + tname + " defense solide (" + str(ga_tot) + " buts encaisses/" + str(played) + " matchs)")
-
-    # Equipe n'a pas encore marque dans ce match
-    gf_tot = (form_data.get("goals", {}).get("for", {}).get("total", {}) or {}).get("total") or 0
-    avg_gf = gf_tot / max(played, 1)
-    if current_goals == 0 and minute >= 35 and avg_gf >= 1.4:
-        insights.append("\u26a0\ufe0f " + tname + " n'a pas encore marque mais " + str(round(avg_gf, 1)) + " buts/match en moy.")
-
-    return insights
+def get_incidents(match):
+    """Retourne la liste des incidents, toujours une liste."""
+    inc = match.get("incidents")
+    if isinstance(inc, list):
+        return inc
+    return []
 
 
-# ═══════════════════════════════════════════════════════
-# MOMENTUM RECENT (events des 10 dernieres min)
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# ANALYSE DES INCIDENTS
+# ═══════════════════════════════════════════════════════════════
 
-def get_recent_momentum(events, home_id, away_id, minute):
+def get_goal_scorers(incidents):
     """
-    Events API-Football:
-      time.elapsed -> int (minute)
-      team.id
-      type: "Goal", "Card", "subst", "Var"
-      detail: "Normal Goal", "Penalty", "Own Goal", "Yellow Card"...
-    On pondère les buts récents.
+    Extrait les buteurs depuis les incidents.
+    Incident: { type, team, minute, player, detail }
     """
-    min_start = max(0, minute - 10)
-    h_score, a_score = 0, 0
-    h_evts, a_evts   = [], []
-
-    for ev in events:
+    home_scorers, away_scorers = [], []
+    for inc in incidents:
         try:
-            m       = int(ev.get("time", {}).get("elapsed") or 0)
+            if str(inc.get("type", "")).lower() != "goal":
+                continue
+            detail = str(inc.get("detail", "")).lower()
+            if "own" in detail:
+                continue
+            minute = int(inc.get("minute") or 0)
+            player = str(inc.get("player") or "?")
+            # Prenom initial + Nom
+            parts  = player.strip().split()
+            short  = (parts[0][0] + ". " + " ".join(parts[1:])) if len(parts) > 1 else player
+            team   = str(inc.get("team", "")).lower()
+            entry  = short + " " + str(minute) + "'"
+            if team == "home":
+                home_scorers.append(entry)
+            elif team == "away":
+                away_scorers.append(entry)
+        except Exception:
+            continue
+    return home_scorers, away_scorers
+
+
+def get_recent_activity(incidents, minute):
+    """
+    Analyse les incidents des 12 dernieres minutes.
+    Retourne score d'activite home/away + labels evenements.
+    """
+    window    = 12
+    min_start = max(0, minute - window)
+    h_pts, a_pts   = 0, 0
+    h_evts, a_evts = [], []
+
+    for inc in incidents:
+        try:
+            m    = int(inc.get("minute") or 0)
             if m < min_start:
                 continue
-            tid     = ev.get("team", {}).get("id")
-            etype   = str(ev.get("type", ""))
-            detail  = str(ev.get("detail", ""))
+            team   = str(inc.get("team", "")).lower()
+            itype  = str(inc.get("type", "")).lower()
+            detail = str(inc.get("detail", "")).lower()
+
             pts, lbl = 0, ""
-            if etype == "Goal" and "Own" not in detail:
-                pts, lbl = 5, "BUT \u26bd"
-            elif etype == "Goal" and "Own" in detail:
+            if itype == "goal" and "own" not in detail:
+                pts, lbl = 5, "\u26bd BUT"
+            elif itype == "goal":
                 pts, lbl = 3, "CSC"
+
             if pts > 0:
-                if tid == home_id:
-                    h_score += pts
-                    h_evts.append(str(m) + "' " + lbl)
-                elif tid == away_id:
-                    a_score += pts
-                    a_evts.append(str(m) + "' " + lbl)
+                entry = str(m) + "' " + lbl
+                if team == "home":
+                    h_pts += pts
+                    h_evts.append(entry)
+                elif team == "away":
+                    a_pts += pts
+                    a_evts.append(entry)
         except Exception:
             continue
 
-    return h_score, a_score, h_evts[-4:], a_evts[-4:]
+    return h_pts, a_pts, h_evts[-3:], a_evts[-3:]
 
 
-# ═══════════════════════════════════════════════════════
-# CALCUL MOMENTUM
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# CALCUL DU SCORE MOMENTUM (0-100)
+# Algorithme multi-criteres ponderes
+# ═══════════════════════════════════════════════════════════════
 
-def calc_efficiency(son, tot):
-    if tot < 3:
+def calc_efficiency(shots_on, shots_total):
+    if shots_total < 3:
         return 0.0, "neutre", 0
-    r = son / tot
+    r = shots_on / shots_total
     if r >= 0.50:   return r, "efficace",   +10
     elif r >= 0.30: return r, "neutre",       0
     else:           return r, "inefficace",  -8
 
 
-def compute_momentum(fixture, stats_resp, events):
-    home_id = fixture["teams"]["home"]["id"]
-    away_id = fixture["teams"]["away"]["id"]
-    minute  = get_minute(fixture)
+def compute_momentum(match, pred, odds):
+    """
+    Score de momentum 0-100 :
+    Critere              Poids max
+    ─────────────────────────────
+    Tirs cadres          22 pts
+    Tirs surface         16 pts
+    Corners               9 pts
+    Arrets gardien        8 pts
+    Attaques dang.        6 pts
+    xG ML predits        22 pts
+    Over 2.5 ML          10 pts
+    Efficacite tirs      10 pts
+    Activite recente      8 pts
+    ─────────────────────────────
+    TOTAL MAX           111 pts → normalise sur 100
+    """
+    minute    = get_minute(match)
+    incidents = get_incidents(match)
+    hg, ag    = get_score(match)
 
-    def sv(stype, tid):
-        return extract_stat(stats_resp, tid, stype)
+    # Stats live
+    h_son = get_stat(match, "home", "shots_on_goal")
+    a_son = get_stat(match, "away", "shots_on_goal")
+    h_sib = get_stat(match, "home", "shots_insidebox")
+    a_sib = get_stat(match, "away", "shots_insidebox")
+    h_tot = get_stat(match, "home", "shots_total")
+    a_tot = get_stat(match, "away", "shots_total")
+    h_cor = get_stat(match, "home", "corners")
+    a_cor = get_stat(match, "away", "corners")
+    h_sav = get_stat(match, "home", "saves")
+    a_sav = get_stat(match, "away", "saves")
+    h_pos = get_stat(match, "home", "ball_possession")
+    a_pos = get_stat(match, "away", "ball_possession")
+    h_dan = get_stat(match, "home", "dangerous_attacks")
+    a_dan = get_stat(match, "away", "dangerous_attacks")
 
-    h_son = sv("Shots on Goal",     home_id)
-    a_son = sv("Shots on Goal",     away_id)
-    h_sib = sv("Shots insidebox",   home_id)
-    a_sib = sv("Shots insidebox",   away_id)
-    h_tot = sv("Total Shots",       home_id)
-    a_tot = sv("Total Shots",       away_id)
-    h_cor = sv("Corner Kicks",      home_id)
-    a_cor = sv("Corner Kicks",      away_id)
-    h_sav = sv("Goalkeeper Saves",  home_id)
-    a_sav = sv("Goalkeeper Saves",  away_id)
-    h_xg  = sv("expected_goals",    home_id)
-    a_xg  = sv("expected_goals",    away_id)
-    h_pos = sv("Ball Possession",   home_id)
-    a_pos = sv("Ball Possession",   away_id)
+    # xG depuis prediction ML
+    h_xg  = safe_float(pred.get("expected_goals_home"))
+    a_xg  = safe_float(pred.get("expected_goals_away"))
+    xg_ok = (h_xg + a_xg) > 0.05
 
-    score = 0
+    # Probabilites ML
+    p_over25 = safe_float(pred.get("prob_over_25"))
+    p_over15 = safe_float(pred.get("prob_over_15"))
+    p_btts   = safe_float(pred.get("prob_btts_yes"))
+    p_home   = safe_float(pred.get("prob_home_win"))
+    p_away   = safe_float(pred.get("prob_away_win"))
+    p_draw   = safe_float(pred.get("prob_draw"))
+    conf     = safe_float(pred.get("confidence"))
+    mls      = str(pred.get("most_likely_score") or "")
+    res      = str(pred.get("predicted_result") or "")
 
-    # Tirs cadres (principal indicateur)
+    raw = 0
+
+    # ── Tirs cadres (indicateur #1 le plus predictif) ─────
     son_t = h_son + a_son
-    if son_t >= 12:   score += 25
-    elif son_t >= 8:  score += 18
-    elif son_t >= 5:  score += 12
-    elif son_t >= 3:  score += 6
+    if son_t >= 14:   raw += 22
+    elif son_t >= 10: raw += 17
+    elif son_t >= 7:  raw += 12
+    elif son_t >= 4:  raw += 7
+    elif son_t >= 2:  raw += 3
 
-    # Tirs dans la surface
+    # ── Tirs dans la surface ──────────────────────────────
     sib_t = h_sib + a_sib
-    if sib_t >= 15:   score += 18
-    elif sib_t >= 10: score += 12
-    elif sib_t >= 6:  score += 7
-    elif sib_t >= 3:  score += 3
+    if sib_t >= 16:   raw += 16
+    elif sib_t >= 11: raw += 12
+    elif sib_t >= 7:  raw += 8
+    elif sib_t >= 4:  raw += 4
 
-    # Corners
+    # ── Corners ───────────────────────────────────────────
     cor_t = h_cor + a_cor
-    if cor_t >= 12:   score += 10
-    elif cor_t >= 8:  score += 7
-    elif cor_t >= 5:  score += 4
-    elif cor_t >= 2:  score += 2
+    if cor_t >= 14:   raw += 9
+    elif cor_t >= 9:  raw += 7
+    elif cor_t >= 6:  raw += 5
+    elif cor_t >= 3:  raw += 2
 
-    # Arrets gardien (pression offensive)
+    # ── Arrets gardien (reflet de la pression offensive) ──
     sav_t = h_sav + a_sav
-    if sav_t >= 8:    score += 8
-    elif sav_t >= 5:  score += 5
-    elif sav_t >= 3:  score += 2
+    if sav_t >= 9:    raw += 8
+    elif sav_t >= 6:  raw += 6
+    elif sav_t >= 4:  raw += 4
+    elif sav_t >= 2:  raw += 2
 
-    # xG (tres fiable quand disponible)
-    xg_t  = h_xg + a_xg
-    xg_ok = xg_t > 0
+    # ── Attaques dangereuses ──────────────────────────────
+    dan_t = h_dan + a_dan
+    if dan_t >= 70:   raw += 6
+    elif dan_t >= 45: raw += 4
+    elif dan_t >= 25: raw += 2
+
+    # ── xG ML (le plus fiable quantitativement) ───────────
+    xg_t = h_xg + a_xg
     if xg_ok:
-        if xg_t >= 3.5:   score += 25
-        elif xg_t >= 2.5: score += 20
-        elif xg_t >= 1.5: score += 14
-        elif xg_t >= 0.8: score += 8
-        elif xg_t >= 0.3: score += 4
+        if xg_t >= 4.0:   raw += 22
+        elif xg_t >= 3.0: raw += 18
+        elif xg_t >= 2.0: raw += 14
+        elif xg_t >= 1.2: raw += 9
+        elif xg_t >= 0.6: raw += 5
+        elif xg_t >= 0.2: raw += 2
 
-    # Efficacite
+    # ── Over 2.5 ML ───────────────────────────────────────
+    if p_over25 >= 85:  raw += 10
+    elif p_over25 >= 70: raw += 7
+    elif p_over25 >= 55: raw += 4
+    elif p_over25 >= 40: raw += 1
+
+    # ── Efficacite de tir ─────────────────────────────────
     h_ratio, h_eff, h_bonus = calc_efficiency(h_son, h_tot)
     a_ratio, a_eff, a_bonus = calc_efficiency(a_son, a_tot)
-    score += h_bonus if h_tot >= a_tot else a_bonus
+    raw += h_bonus if h_tot >= a_tot else a_bonus
 
-    # Momentum recent (buts des 10 dernieres min)
-    h_rec, a_rec, h_rev, a_rev = get_recent_momentum(events, home_id, away_id, minute)
+    # ── Activite recente (12 dernieres min) ───────────────
+    h_rec, a_rec, h_rev, a_rev = get_recent_activity(incidents, minute)
     rec_t = h_rec + a_rec
-    if rec_t >= 10:   score += 10
-    elif rec_t >= 5:  score += 6
-    elif rec_t >= 2:  score += 3
+    if rec_t >= 10:   raw += 8
+    elif rec_t >= 5:  raw += 5
+    elif rec_t >= 2:  raw += 2
+
+    # Normalisation sur 100 (max theorique = ~111)
+    score = int(min(raw * 100 / 111, 100))
+    score = max(score, 0)
 
     return {
-        "score":        min(max(score, 0), 100),
-        "h_son": h_son, "a_son": a_son,
-        "h_sib": h_sib, "a_sib": a_sib,
-        "h_tot": h_tot, "a_tot": a_tot,
-        "h_cor": h_cor, "a_cor": a_cor,
-        "h_sav": h_sav, "a_sav": a_sav,
-        "h_xg":  h_xg,  "a_xg":  a_xg,
-        "h_pos": h_pos, "a_pos": a_pos,
-        "h_eff": h_eff, "a_eff": a_eff,
+        "score":    score,
+        "raw":      raw,
+        # Stats
+        "h_son": h_son,  "a_son": a_son,
+        "h_sib": h_sib,  "a_sib": a_sib,
+        "h_tot": h_tot,  "a_tot": a_tot,
+        "h_cor": h_cor,  "a_cor": a_cor,
+        "h_sav": h_sav,  "a_sav": a_sav,
+        "h_pos": h_pos,  "a_pos": a_pos,
+        "h_dan": h_dan,  "a_dan": a_dan,
+        # xG & ML
+        "h_xg":  h_xg,   "a_xg":  a_xg,
+        "xg_ok": xg_ok,
+        "p_over25": p_over25,
+        "p_over15": p_over15,
+        "p_btts":   p_btts,
+        "p_home":   p_home,
+        "p_draw":   p_draw,
+        "p_away":   p_away,
+        "conf":     conf,
+        "mls":      mls,
+        "res":      res,
+        # Efficacite
+        "h_eff": h_eff,  "a_eff": a_eff,
         "h_ratio": h_ratio, "a_ratio": a_ratio,
-        "xg_ok":  xg_ok,
-        "h_rec":  h_rec,  "a_rec":  a_rec,
-        "h_rev":  h_rev,  "a_rev":  a_rev,
+        # Activite recente
+        "h_rec": h_rec,  "a_rec": a_rec,
+        "h_rev": h_rev,  "a_rev": a_rev,
     }
 
 
-# ═══════════════════════════════════════════════════════
-# SEUIL INTELLIGENT
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# SEUIL INTELLIGENT ADAPTATIF
+# ═══════════════════════════════════════════════════════════════
 
-def get_threshold(minute, hg, ag, h_eff, a_eff):
+def get_threshold(minute, hg, ag, m):
+    """
+    Seuil dynamique selon :
+    - Minute du match (urgence en fin de match)
+    - Contexte scoreline (match serre = plus interessant)
+    - Efficacite de l'equipe dominante
+    - Confirmation ML (Over 2.5, confiance)
+    """
     base = 45
-    if minute >= 82:    base -= 14
-    elif minute >= 75:  base -= 10
-    elif minute >= 65:  base -= 6
-    elif minute >= 55:  base -= 3
-    elif minute < 15:   base += 10
-    elif minute < 25:   base += 5
-    diff = abs(hg - ag)
-    if diff == 1 and minute >= 65:   base -= 7
-    elif diff == 0 and minute >= 60: base -= 4
-    elif diff >= 3:                  base += 8
-    dom_eff = h_eff if hg <= ag else a_eff
-    if dom_eff == "inefficace":      base += 5
-    elif dom_eff == "efficace":      base -= 3
-    return max(35, min(base, 72))
 
+    # Temps de jeu - urgence croissante
+    if minute >= 83:    base -= 16
+    elif minute >= 76:  base -= 12
+    elif minute >= 68:  base -= 8
+    elif minute >= 58:  base -= 5
+    elif minute >= 47:  base -= 2
+    elif minute < 12:   base += 14
+    elif minute < 22:   base += 8
+    elif minute < 32:   base += 3
+
+    # Contexte du score
+    diff = abs(hg - ag)
+    total_g = hg + ag
+    if diff == 0:
+        if minute >= 70:  base -= 8   # 0-0 ou egalite en fin = risque max
+        elif minute >= 55: base -= 4
+    elif diff == 1:
+        if minute >= 70:  base -= 8   # Score serre en fin
+        elif minute >= 55: base -= 5
+    elif diff == 2:
+        base += 4                      # Match presque plié
+    elif diff >= 3:
+        base += 12                     # Match plié - moins d'interet
+
+    # Mi-temps: legere hausse du seuil
+    if 44 <= minute <= 47:
+        base += 3
+
+    # Confirmation ML
+    if m["p_over25"] >= 75:   base -= 6
+    elif m["p_over25"] >= 60: base -= 3
+    if m["conf"] >= 70:       base -= 4
+    elif m["conf"] >= 55:     base -= 2
+
+    # Efficacite equipe dominante
+    dom_eff = m["h_eff"] if hg <= ag else m["a_eff"]
+    if dom_eff == "efficace":    base -= 4
+    elif dom_eff == "inefficace": base += 5
+
+    return max(32, min(base, 73))
+
+
+# ═══════════════════════════════════════════════════════════════
+# EQUIPE DOMINANTE
+# ═══════════════════════════════════════════════════════════════
 
 def get_dominant(m, h_name, a_name):
-    h_pwr = m["h_son"]*4 + m["h_sib"]*2 + m["h_cor"]*1.5 + m["h_xg"]*8 + m["h_sav"]*1
-    a_pwr = m["a_son"]*4 + m["a_sib"]*2 + m["a_cor"]*1.5 + m["a_xg"]*8 + m["a_sav"]*1
-    if h_pwr > a_pwr * 1.35:   return "home", h_name, m["h_eff"]
-    elif a_pwr > h_pwr * 1.35: return "away", a_name, m["a_eff"]
-    return "balanced", None, "neutre"
+    """
+    Calcule l'equipe dominante via un score de puissance pondere.
+    xG est le meilleur indicateur, suivi des tirs cadres.
+    """
+    h_pwr = (m["h_son"] * 5 + m["h_sib"] * 3 + m["h_cor"] * 2
+             + m["h_sav"] * 2 + m["h_xg"] * 12 + m["h_dan"] * 0.08)
+    a_pwr = (m["a_son"] * 5 + m["a_sib"] * 3 + m["a_cor"] * 2
+             + m["a_sav"] * 2 + m["a_xg"] * 12 + m["a_dan"] * 0.08)
+
+    if h_pwr > a_pwr * 1.3:
+        return "home", h_name, m["h_eff"], h_pwr, a_pwr
+    elif a_pwr > h_pwr * 1.3:
+        return "away", a_name, m["a_eff"], h_pwr, a_pwr
+    return "balanced", None, "neutre", h_pwr, a_pwr
 
 
 def eff_emoji(e):
@@ -543,240 +652,417 @@ def eff_emoji(e):
     return ""
 
 
-# ═══════════════════════════════════════════════════════
-# MESSAGE TELEGRAM
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# CONSTRUCTION DU MESSAGE TELEGRAM
+# ═══════════════════════════════════════════════════════════════
 
-def build_message(fixture, m, threshold, h_insights, a_insights):
-    league  = fixture["league"]["name"]
-    h_name  = fixture["teams"]["home"]["name"]
-    a_name  = fixture["teams"]["away"]["name"]
-    hg, ag  = get_score(fixture)
-    minute  = get_minute(fixture)
+def build_message(match, m, pred, odds, threshold):
+    league  = str(match.get("league", {}).get("name", "Ligue ?"))
+    h_name  = str(match.get("home_team", "Domicile"))
+    a_name  = str(match.get("away_team", "Visiteur"))
+    hg, ag  = get_score(match)
+    minute  = get_minute(match)
     score   = m["score"]
     total_g = hg + ag
+    incidents = get_incidents(match)
 
-    dom_side, dom_name, dom_eff = get_dominant(m, h_name, a_name)
+    dom_side, dom_name, dom_eff, h_pwr, a_pwr = get_dominant(m, h_name, a_name)
 
+    # ── Niveau d'alerte ───────────────────────────────────
     margin = score - threshold
-    if margin >= 22 or score >= 78:
+    if margin >= 20 or score >= 80:
         lvl = "\U0001f534 ALERTE MAX"
         emj = "\U0001f534"
-    elif margin >= 12 or score >= 62:
+    elif margin >= 10 or score >= 65:
         lvl = "\U0001f7e0 FORTE PRESSION"
         emj = "\U0001f7e0"
     else:
         lvl = "\U0001f7e1 PRESSION"
         emj = "\U0001f7e1"
 
+    # ── Jauge de momentum ─────────────────────────────────
     filled = int(score / 10)
     gauge  = "\U0001f7e9" * filled + "\u2b1c" * (10 - filled)
 
-    # Stats
-    def stat_line(tname, son, sib, cor, tot, xg, pos, sav, eff, ratio):
+    # ── Buteurs ───────────────────────────────────────────
+    h_scorers, a_scorers = get_goal_scorers(incidents)
+    scorers_block = ""
+    if h_scorers or a_scorers:
+        h_str = ", ".join(h_scorers) if h_scorers else "\u2014"
+        a_str = ", ".join(a_scorers) if a_scorers else "\u2014"
+        scorers_block = (SEP + "\n\u26bd BUTEURS:\n"
+                         + "  \U0001f539 " + h_name + ": " + h_str + "\n"
+                         + "  \U0001f539 " + a_name + ": " + a_str + "\n")
+
+    # ── Stats live ────────────────────────────────────────
+    def fmt_stat_line(tname, son, sib, cor, tot, sav, pos, dan, eff, ratio):
         parts = []
-        if son >= 1: parts.append(str(int(son)) + " tirs cadres")
-        if sib >= 1: parts.append(str(int(sib)) + " tirs surface")
-        if cor >= 1: parts.append(str(int(cor)) + " corners")
-        if sav >= 1: parts.append(str(int(sav)) + " arrets adv.")
+        if son >= 1:  parts.append(str(int(son)) + " tirs cadres")
+        if sib >= 1:  parts.append(str(int(sib)) + " surface")
+        if cor >= 1:  parts.append(str(int(cor)) + " corners")
+        if sav >= 1:  parts.append(str(int(sav)) + " arrets adv.")
+        if dan >= 8:  parts.append(str(int(dan)) + " att.dang.")
         if not parts:
-            return ""
-        pct    = str(int(ratio*100)) + "%" if tot >= 3 else "?"
-        xg_str = " | xG: " + str(round(xg, 2)) if xg > 0 else ""
-        pos_str = " | poss: " + str(int(pos)) + "%" if pos > 0 else ""
-        return ("  \U0001f539 " + tname + ":\n"
-                + "    " + " | ".join(parts) + "\n"
-                + "    precision: " + pct + eff_emoji(eff) + xg_str + pos_str)
+            return "  \U0001f539 " + tname + ": stats non dispo"
+        line = "  \U0001f539 " + tname + ": " + " | ".join(parts)
+        extras = []
+        if tot >= 3:
+            extras.append("precis: " + str(int(ratio * 100)) + "%" + eff_emoji(eff))
+        if pos > 0:
+            extras.append("poss: " + str(int(pos)) + "%")
+        if extras:
+            line += "\n    (" + " · ".join(extras) + ")"
+        return line
 
-    h_line = stat_line(h_name, m["h_son"], m["h_sib"], m["h_cor"],
-                       m["h_tot"], m["h_xg"], m["h_pos"], m["h_sav"],
-                       m["h_eff"], m["h_ratio"])
-    a_line = stat_line(a_name, m["a_son"], m["a_sib"], m["a_cor"],
-                       m["a_tot"], m["a_xg"], m["a_pos"], m["a_sav"],
-                       m["a_eff"], m["a_ratio"])
-    stats_block = ""
-    if h_line: stats_block += h_line + "\n"
-    if a_line: stats_block += a_line
-    if not stats_block.strip():
-        stats_block = "  \u2022 Stats en cours de chargement..."
+    h_stat = fmt_stat_line(h_name, m["h_son"], m["h_sib"], m["h_cor"],
+                           m["h_tot"], m["h_sav"], m["h_pos"], m["h_dan"],
+                           m["h_eff"], m["h_ratio"])
+    a_stat = fmt_stat_line(a_name, m["a_son"], m["a_sib"], m["a_cor"],
+                           m["a_tot"], m["a_sav"], m["a_pos"], m["a_dan"],
+                           m["a_eff"], m["a_ratio"])
 
-    # Momentum recent
+    # ── xG ────────────────────────────────────────────────
+    xg_block = ""
+    if m["xg_ok"]:
+        xg_t   = m["h_xg"] + m["a_xg"]
+        h_xg_s = str(round(m["h_xg"], 2))
+        a_xg_s = str(round(m["a_xg"], 2))
+        bar_h  = "\U0001f7e2" if m["h_xg"] > m["a_xg"] else "\U0001f534"
+        bar_a  = "\U0001f7e2" if m["a_xg"] > m["h_xg"] else "\U0001f534"
+        xg_block = (SEP + "\n\U0001f4d0 xG ATTENDUS (ML):\n"
+                    + "  " + bar_h + " " + h_name + ": " + h_xg_s + "\n"
+                    + "  " + bar_a + " " + a_name + ": " + a_xg_s + "\n"
+                    + "  Total xG: " + str(round(xg_t, 2)) + "\n")
+
+    # ── Predictions ML ────────────────────────────────────
+    ml_block = ""
+    if pred:
+        ml_lines = []
+
+        # Probabilites 1X2
+        ph = m["p_home"]
+        pd = m["p_draw"]
+        pa = m["p_away"]
+        if ph > 0 or pd > 0 or pa > 0:
+            # Barre visuelle
+            def pct_bar(p, maxlen=8):
+                filled_b = int(round(p / 100 * maxlen))
+                return "\u2588" * filled_b + "\u2591" * (maxlen - filled_b)
+            ml_lines.append("  1X2:")
+            ml_lines.append("  " + h_name[:13] + " " + str(round(ph, 1)) + "% " + pct_bar(ph))
+            ml_lines.append("  Nul         " + str(round(pd, 1)) + "% " + pct_bar(pd))
+            ml_lines.append("  " + a_name[:13] + " " + str(round(pa, 1)) + "% " + pct_bar(pa))
+
+        # Over/Under
+        po25 = m["p_over25"]
+        po15 = m["p_over15"]
+        if po25 > 0:
+            ic = "\U0001f7e2" if po25 >= 65 else ("\U0001f7e1" if po25 >= 45 else "\U0001f534")
+            ml_lines.append("  " + ic + " Over 2.5: " + str(round(po25, 1)) + "%")
+        if po15 > 0:
+            ic = "\U0001f7e2" if po15 >= 75 else "\U0001f7e1"
+            ml_lines.append("  " + ic + " Over 1.5: " + str(round(po15, 1)) + "%")
+
+        # BTTS
+        pb = m["p_btts"]
+        if pb > 0:
+            ic = "\U0001f7e2" if pb >= 60 else ("\U0001f7e1" if pb >= 45 else "\U0001f534")
+            ml_lines.append("  " + ic + " BTTS: " + str(round(pb, 1)) + "%")
+
+        # Score le plus probable
+        if m["mls"] and m["mls"] not in ("?", "None", ""):
+            ml_lines.append("  \U0001f3af Score probable: " + m["mls"])
+
+        # Confiance
+        cf = m["conf"]
+        if cf > 0:
+            cf_bar = "\U0001f7e2" if cf >= 65 else ("\U0001f7e1" if cf >= 45 else "\U0001f534")
+            ml_lines.append("  " + cf_bar + " Confiance modele: " + str(round(cf, 1)) + "%")
+
+        if ml_lines:
+            ml_block = (SEP + "\n\U0001f916 PREDICTIONS ML (CatBoost v4):\n"
+                        + "\n".join(ml_lines) + "\n")
+
+    # ── Cotes live ────────────────────────────────────────
+    odds_block = ""
+    if odds:
+        odds_lines = []
+        o_h   = odds.get("home", 0)
+        o_d   = odds.get("draw", 0)
+        o_a   = odds.get("away", 0)
+        o_o25 = odds.get("over_25", 0)
+        o_u25 = odds.get("under_25", 0)
+        o_bts = odds.get("btts_yes", 0)
+        if o_h:   odds_lines.append("  1: @" + str(round(o_h, 2)))
+        if o_d:   odds_lines.append("  X: @" + str(round(o_d, 2)))
+        if o_a:   odds_lines.append("  2: @" + str(round(o_a, 2)))
+        if o_o25: odds_lines.append("  Over 2.5: @" + str(round(o_o25, 2)))
+        if o_u25: odds_lines.append("  Under 2.5: @" + str(round(o_u25, 2)))
+        if o_bts: odds_lines.append("  BTTS: @" + str(round(o_bts, 2)))
+        if odds_lines:
+            odds_block = (SEP + "\n\U0001f4b9 COTES LIVE:\n"
+                          + "\n".join(odds_lines) + "\n")
+
+    # ── Activite recente ──────────────────────────────────
     rec_block = ""
     if m["h_rev"] or m["a_rev"]:
-        rec_block = SEP + "\n\u26a1 MOMENTUM 10 DERNIERES MIN:\n"
-        if m["h_rev"]: rec_block += "  \U0001f539 " + h_name + ": " + ", ".join(m["h_rev"]) + "\n"
-        if m["a_rev"]: rec_block += "  \U0001f539 " + a_name + ": " + ", ".join(m["a_rev"]) + "\n"
+        rec_block = SEP + "\n\u26a1 MOMENTUM 12 DERNIERES MIN:\n"
+        if m["h_rev"]:
+            rec_block += "  \U0001f539 " + h_name + ": " + " | ".join(m["h_rev"]) + "\n"
+        if m["a_rev"]:
+            rec_block += "  \U0001f539 " + a_name + ": " + " | ".join(m["a_rev"]) + "\n"
         if m["h_rec"] > m["a_rec"] * 1.4:
-            rec_block += "  \u27a1\ufe0f " + h_name + " domine ces 10 dernieres min\n"
+            rec_block += "  \u27a1\ufe0f " + h_name + " en pleine montee en puissance\n"
         elif m["a_rec"] > m["h_rec"] * 1.4:
-            rec_block += "  \u27a1\ufe0f " + a_name + " domine ces 10 dernieres min\n"
+            rec_block += "  \u27a1\ufe0f " + a_name + " en pleine montee en puissance\n"
         else:
-            rec_block += "  \u27a1\ufe0f Pression equilibree\n"
+            rec_block += "  \u27a1\ufe0f Pression des deux cotes\n"
 
-    # Forme
-    all_insights = h_insights + a_insights
-    form_block   = ""
-    if all_insights:
-        form_block = SEP + "\n\U0001f4ca FORME & TENDANCES:\n"
-        for line in all_insights:
-            form_block += "  " + line + "\n"
-
-    # Recommandations
+    # ── Recommandations de paris ──────────────────────────
     recs = []
+
+    # 1. Prochain but
     if dom_name:
-        if dom_eff == "inefficace":
-            recs.append("  \u2192 \u26bd " + dom_name + " domine mais imprecise")
-        elif dom_eff == "efficace":
-            recs.append("  \u2192 \u26bd Prochain but : " + dom_name + " (dominante + efficace) \U0001f3af")
+        if dom_eff == "efficace":
+            recs.append("  \u2192 \u26bd Prochain but : "
+                        + dom_name + " (dominante + efficace) \U0001f3af")
+        elif dom_eff == "inefficace":
+            recs.append("  \u2192 \u26bd " + dom_name
+                        + " domine mais imprecise \U0001f4a8 - patience")
         else:
-            recs.append("  \u2192 \u26bd Prochain but : " + dom_name + " (dominante)")
+            recs.append("  \u2192 \u26bd Prochain but probable : " + dom_name)
     else:
-        recs.append("  \u2192 \u26bd Prochain but : match ouvert - les deux peuvent marquer")
+        recs.append("  \u2192 \u26bd Match ouvert - les deux equipes menacent")
 
-    if dom_eff != "inefficace":
+    # 2. Over/Under avec support ML
+    if m["p_over25"] >= 70:
+        recs.append("  \u2192 \U0001f4c8 Over " + str(total_g) + ".5 buts"
+                    + " (\U0001f916 " + str(round(m["p_over25"], 0)) + "% ML)")
+    elif dom_eff != "inefficace":
         recs.append("  \u2192 \U0001f4c8 Over " + str(total_g) + ".5 buts dans le match")
-        if minute < 45:
+
+    # Over MT
+    if minute < 44:
+        if m["p_over15"] >= 65:
+            recs.append("  \u2192 \U0001f4c8 Over 1.5 buts 1ere MT (\U0001f916 "
+                        + str(round(m["p_over15"], 0)) + "% ML)")
+        else:
             recs.append("  \u2192 \U0001f4c8 Over 0.5 buts 1ere MT")
-        elif minute < 90:
-            recs.append("  \u2192 \U0001f4c8 Over 0.5 buts 2eme MT")
-    else:
-        recs.append("  \u2192 \U0001f4c8 Over " + str(total_g) + ".5 possible mais equipe imprecise")
+    elif minute < 92:
+        recs.append("  \u2192 \U0001f4c8 Over 0.5 buts 2eme MT")
 
-    if hg == 0 and ag == 0 and minute >= 30:
-        recs.append("  \u2192 \U0001f3af BTTS - 0-0 mais les deux equipes poussent")
-    elif total_g >= 1 and (hg == 0 or ag == 0) and minute >= 55:
-        label_0 = "Domicile" if hg == 0 else "Visiteur"
-        recs.append("  \u2192 \U0001f3af BTTS - " + label_0 + " a 0 sous pression")
+    # 3. BTTS
+    if m["p_btts"] >= 65:
+        recs.append("  \u2192 \U0001f3af BTTS Yes (\U0001f916 "
+                    + str(round(m["p_btts"], 0)) + "% ML)")
+    elif hg == 0 and ag == 0 and minute >= 28:
+        recs.append("  \u2192 \U0001f3af BTTS - match nul 0-0 sous pression")
+    elif total_g >= 1 and (hg == 0 or ag == 0) and minute >= 52:
+        equipe_0 = h_name if hg == 0 else a_name
+        recs.append("  \u2192 \U0001f3af BTTS - " + equipe_0 + " n'a pas encore marque")
 
+    # 4. Score exact ML
+    if m["mls"] and m["mls"] not in ("?", "None", ""):
+        recs.append("  \u2192 \U0001f3af Score exact: " + m["mls"] + " (distribution Poisson ML)")
+
+    # 5. xG insight
     if m["xg_ok"]:
         xg_t = m["h_xg"] + m["a_xg"]
-        if xg_t >= 2.5:
-            recs.append("  \u2192 \U0001f4d0 xG total eleve (" + str(round(xg_t, 2)) + ") - match tres offensif")
-        elif xg_t < 0.5:
-            recs.append("  \u2192 \U0001f4d0 xG faible (" + str(round(xg_t, 2)) + ") - prudence buts")
+        if xg_t >= 3.5:
+            recs.append("  \u2192 \U0001f4d0 xG total: " + str(round(xg_t, 2))
+                        + " - match TRES offensif")
+        elif xg_t >= 2.0:
+            recs.append("  \u2192 \U0001f4d0 xG total: " + str(round(xg_t, 2))
+                        + " - bonne opportunite offensive")
 
-    rec_section = SEP + "\n\U0001f4a1 QUOI JOUER:\n" + "\n".join(recs) + "\n"
+    rec_section = (SEP + "\n\U0001f4a1 QUOI JOUER:\n"
+                   + "\n".join(recs) + "\n")
 
+    # ── Assemblage final ──────────────────────────────────
     return (emj + " " + lvl + " - BUT POTENTIEL\n"
             + SEP + "\n"
             + "\U0001f3c6 " + league + "\n"
-            + "\u2694\ufe0f  " + h_name + " " + str(hg) + " - " + str(ag) + " " + a_name + "\n"
-            + "\u23f1\ufe0f  " + str(minute) + "' | Momentum: " + str(score) + "/100\n"
+            + "\u2694\ufe0f  " + h_name + " \U0001f7e5 " + str(hg)
+            + "  \u2014  " + str(ag) + " \U0001f7e6 " + a_name + "\n"
+            + "\u23f1\ufe0f  " + str(minute) + "' | Momentum: "
+            + str(score) + "/100\n"
             + gauge + "\n"
+            + scorers_block
             + SEP + "\n"
-            + "\U0001f4ca STATS:\n" + stats_block + "\n"
+            + "\U0001f4ca STATS LIVE:\n"
+            + h_stat + "\n"
+            + a_stat + "\n"
+            + xg_block
+            + ml_block
+            + odds_block
             + rec_block
-            + form_block
             + rec_section
             + SEP + "\n"
             + "\u26a0\ufe0f Parie de facon responsable")
 
 
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # BOUCLE PRINCIPALE
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 
 async def run_forever():
     bot        = Bot(token=TELEGRAM_TOKEN)
     loop_count = 0
-    print("  BOT DEMARRE - intervalle " + str(INTERVAL) + "s", flush=True)
+
+    # Message de demarrage
+    try:
+        start_msg = ("\U0001f7e2 BOT FOOTBALL DEMARRE\n"
+                     + SEP + "\n"
+                     + "\U0001f4cb " + str(len(WATCHED_LEAGUES)) + " ligues surveillees\n"
+                     + "\u23f1\ufe0f Verification toutes les "
+                     + str(INTERVAL) + "s\n"
+                     + "\U0001f916 ML CatBoost v4 actif\n"
+                     + "\U0001f4d0 xG + cotes live\n"
+                     + SEP)
+        await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=start_msg)
+        print("  Message de demarrage envoye", flush=True)
+    except Exception as e:
+        print("  Erreur msg demarrage: " + str(e), flush=True)
 
     while True:
         loop_count += 1
-        print("\n" + "=" * 35, flush=True)
-        print("  Check #" + str(loop_count), flush=True)
+        now_str = datetime.now().strftime("%H:%M:%S")
+        print("\n" + "=" * 45, flush=True)
+        print("  Cycle #" + str(loop_count) + " - " + now_str, flush=True)
 
         try:
-            fixtures = get_live_fixtures()
+            matches = get_live_matches()
 
-            if not fixtures:
+            if not matches:
                 print("  Aucun match live dans nos ligues", flush=True)
             else:
-                for f in fixtures:
+                for match in matches:
                     try:
-                        fid    = f["fixture"]["id"]
-                        minute = get_minute(f)
-                        hg, ag = get_score(f)
-                        h_name = f["teams"]["home"]["name"]
-                        a_name = f["teams"]["away"]["name"]
-                        lid    = f["league"]["id"]
-                        h_id   = f["teams"]["home"]["id"]
-                        a_id   = f["teams"]["away"]["id"]
-
-                        # Ignorer statuts non-live
-                        s_short = f.get("fixture", {}).get("status", {}).get("short", "")
-                        if s_short in ("HT", "NS", "FT", "AET", "PEN", "PST", "CANC", "ABD", "SUSP", "INT"):
+                        event_id = match.get("id")
+                        if not event_id:
                             continue
 
-                        # Stats + Events (cache 30s - 2 req par match)
-                        stats_resp, events = get_fixture_stats_and_events(fid)
+                        # Verifier statut live
+                        status = str(match.get("status", "")).lower().strip()
+                        # Bzzoiro: "live" pour les matchs en cours
+                        # Ignorer: "notstarted", "finished", "postponed", etc.
+                        if status not in ("live",):
+                            continue
+
+                        minute  = get_minute(match)
+                        hg, ag  = get_score(match)
+                        h_name  = str(match.get("home_team", "?"))
+                        a_name  = str(match.get("away_team", "?"))
+                        league  = str(match.get("league", {}).get("name", "?"))
+
+                        # Ignorer mi-temps (minute 45 fixe)
+                        if minute == 45:
+                            continue
+
+                        # Predictions ML (cache 10 min)
+                        pred = get_prediction(event_id)
+
+                        # Cotes depuis le match (si disponibles)
+                        odds = get_odds_from_match(match)
 
                         # Calcul momentum
-                        m         = compute_momentum(f, stats_resp, events)
+                        m         = compute_momentum(match, pred, odds)
                         score     = m["score"]
-                        threshold = get_threshold(minute, hg, ag, m["h_eff"], m["a_eff"])
+                        threshold = get_threshold(minute, hg, ag, m)
 
-                        xg_str = (" xG:" + str(round(m["h_xg"],1)) + "/"
-                                  + str(round(m["a_xg"],1))) if m["xg_ok"] else ""
+                        # Log de supervision
+                        xg_s  = (" xG:" + str(round(m["h_xg"], 1))
+                                 + "/" + str(round(m["a_xg"], 1))) if m["xg_ok"] else ""
+                        ml_s  = (" O25=" + str(round(m["p_over25"], 0))
+                                 + "%") if m["p_over25"] > 0 else ""
+                        print("  [" + str(minute) + "'] "
+                              + h_name[:12] + " " + str(hg) + "-"
+                              + str(ag) + " " + a_name[:12]
+                              + " | " + str(score) + "/" + str(threshold)
+                              + " | son=" + str(int(m["h_son"])) + "/"
+                              + str(int(m["a_son"]))
+                              + " cor=" + str(int(m["h_cor"])) + "/"
+                              + str(int(m["a_cor"]))
+                              + xg_s + ml_s,
+                              flush=True)
 
-                        print("  [" + str(minute) + "'] " + h_name + " " + str(hg) + "-"
-                              + str(ag) + " " + a_name
-                              + " | score=" + str(score) + " seuil=" + str(threshold)
-                              + " | son=" + str(int(m["h_son"])) + "/" + str(int(m["a_son"]))
-                              + " cor=" + str(int(m["h_cor"])) + "/" + str(int(m["a_cor"]))
-                              + xg_str, flush=True)
+                        # Alerte si seuil atteint (fenetre 15 min anti-spam)
+                        window    = minute // 15
+                        alert_key = str(event_id) + "_" + str(window)
 
-                        # Alerte par fenetre de 15 minutes
-                        alert_key = str(fid) + "_" + str(minute // 15)
                         if score >= threshold and alert_key not in alerts_sent:
                             alerts_sent[alert_key] = True
-
-                            # Forme equipes (cache 1h - 2 req max)
-                            h_form_raw = get_team_form(h_id, lid)
-                            a_form_raw = get_team_form(a_id, lid)
-                            h_insights = parse_form_insights(h_form_raw, h_name, minute, hg)
-                            a_insights = parse_form_insights(a_form_raw, a_name, minute, ag)
-
-                            msg = build_message(f, m, threshold, h_insights, a_insights)
-                            await bot.send_message(chat_id=str(TELEGRAM_CHAT_ID), text=msg)
-                            print("  ALERTE: " + h_name + " vs " + a_name
-                                  + " [" + str(minute) + "'] score=" + str(score), flush=True)
+                            msg = build_message(match, m, pred, odds, threshold)
+                            await bot.send_message(
+                                chat_id=str(TELEGRAM_CHAT_ID),
+                                text=msg
+                            )
+                            print("  \u2705 ALERTE ENVOYEE: "
+                                  + h_name + " vs " + a_name
+                                  + " [" + str(minute) + "']"
+                                  + " score=" + str(score),
+                                  flush=True)
                             await asyncio.sleep(1.5)
 
                     except Exception as e:
-                        print("  ERREUR match: " + str(e), flush=True)
+                        eid = match.get("id", "?") if isinstance(match, dict) else "?"
+                        print("  ERREUR match " + str(eid) + ": " + str(e), flush=True)
                         traceback.print_exc()
 
-            # Nettoyage memoire
-            if len(alerts_sent) > 600:
-                for k in list(alerts_sent.keys())[:300]:
+            # Nettoyage memoire periodique
+            if len(alerts_sent) > 1000:
+                keys = list(alerts_sent.keys())[:500]
+                for k in keys:
                     del alerts_sent[k]
-            if len(stats_cache) > 80:
-                for k in list(stats_cache.keys())[:40]:
-                    del stats_cache[k]
+                print("  [MEM] Cache alertes nettoye", flush=True)
+
+            if len(pred_cache) > 300:
+                keys = list(pred_cache.keys())[:150]
+                for k in keys:
+                    del pred_cache[k]
+
+            if len(live_cache) > 10:
+                live_cache.clear()
 
         except Exception as e:
             print("  ERREUR BOUCLE: " + str(e), flush=True)
             traceback.print_exc()
+            await asyncio.sleep(10)   # pause courte avant retry
 
         print("  Prochaine verif dans " + str(INTERVAL) + "s", flush=True)
         await asyncio.sleep(INTERVAL)
 
 
-# ═══════════════════════════════════════════════════════
-# ENTREE
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+# POINT D'ENTREE
+# ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Verification variables d'environnement
     missing = []
-    if not API_KEY:          missing.append("APIFOOTBALL_KEY")
-    if not TELEGRAM_TOKEN:   missing.append("TELEGRAM_TOKEN")
-    if not TELEGRAM_CHAT_ID: missing.append("TELEGRAM_CHAT_ID")
+    if not BZZOIRO_KEY:
+        missing.append("BZZOIRO_KEY")
+    if not TELEGRAM_TOKEN:
+        missing.append("TELEGRAM_TOKEN")
+    if not TELEGRAM_CHAT_ID:
+        missing.append("TELEGRAM_CHAT_ID")
+
     if missing:
-        print("VARIABLES MANQUANTES: " + ", ".join(missing), flush=True)
-        print("Configurez-les dans Railway > Variables", flush=True)
+        print("", flush=True)
+        print("  ERREUR - Variables manquantes:", flush=True)
+        for v in missing:
+            print("  ✗ " + v, flush=True)
+        print("", flush=True)
+        print("  Comment les configurer:", flush=True)
+        print("  Railway > ton projet > Variables > + New Variable", flush=True)
+        print("  BZZOIRO_KEY : ta cle de sports.bzzoiro.com/register/", flush=True)
         exit(1)
 
-    print("  Config OK - " + str(len(LEAGUES)) + " ligues suivies", flush=True)
-    print("  Saison: " + str(CURRENT_SEASON), flush=True)
+    print("  Config OK:", flush=True)
+    print("  ✓ BZZOIRO_KEY      : " + BZZOIRO_KEY[:8] + "...", flush=True)
+    print("  ✓ TELEGRAM_TOKEN   : " + TELEGRAM_TOKEN[:10] + "...", flush=True)
+    print("  ✓ TELEGRAM_CHAT_ID : " + str(TELEGRAM_CHAT_ID), flush=True)
+    print("  ✓ Ligues suivies   : " + str(len(WATCHED_LEAGUES)), flush=True)
+    print("", flush=True)
+
     asyncio.run(run_forever())
