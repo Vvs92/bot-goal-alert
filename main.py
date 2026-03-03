@@ -92,9 +92,11 @@ print(”=” * 55, flush=True)
 
 # IDs confirmes sur sports.bzzoiro.com/leagues/
 
+# TOUTES les ligues Bzzoiro (21 au total - confirmes sur sports.bzzoiro.com/leagues/)
+
 WATCHED_LEAGUES = {
 1:  “Premier League”,
-2:  “Liga Portugal”,
+2:  “Liga Portugal Betclic”,
 3:  “La Liga”,
 4:  “Serie A”,
 5:  “Bundesliga”,
@@ -105,15 +107,16 @@ WATCHED_LEAGUES = {
 10: “Eredivisie”,
 11: “Trendyol Super Lig”,
 12: “Championship”,
+13: “Scottish Premiership”,
 14: “Belgian Pro League”,
 15: “Super League Suisse”,
 17: “Saudi Pro League”,
 18: “MLS”,
 19: “Liga MX Apertura”,
 20: “Liga MX Clausura”,
-22: “Parva Liga”,
+22: “Parva Liga Bulgarie”,
 23: “Superliga Roumanie”,
-24: “Super League Grece”,
+24: “Stoiximan Super League Grece”,
 }
 
 # Statuts live valides (doc officielle Bzzoiro)
