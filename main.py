@@ -13,31 +13,31 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 BZZOIRO_KEY = os.environ.get("BZZOIRO_KEY")
 BASE_URL = "https://sports.bzzoiro.com"
+HEADERS = {"Authorization": f"Token {BZZOIRO_KEY}"}
 
 
 def get_live_matches():
-    headers = {"Authorization": f"Token {BZZOIRO_KEY}"}
-    url = f"{BASE_URL}/api/events/?status=inprogress"
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return data.get("results") or data.get("data") or data.get("events") or []
-    except Exception as e:
-        logger.error(f"Error: {e}")
+    for status in ["inprogress", "live", "1H", "2H", "HT"]:
+        try:
+            url = f"{BASE_URL}/api/events/?status={status}"
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            data = r.json()
+            results = data.get("results", [])
+            if results:
+                logger.info(f"Found {len(results)} matches with status={status}")
+                return results
+        except Exception as e:
+            logger.error(f"Error status={status}: {e}")
     return []
 
 
 def format_match(match):
-    home = match.get("home_team") or match.get("home") or match.get("localTeam", {})
-    away = match.get("away_team") or match.get("away") or match.get("visitorTeam", {})
+    home = match.get("home_team") or match.get("home") or {}
+    away = match.get("away_team") or match.get("away") or {}
     if isinstance(home, dict):
-        home = home.get("name") or home.get("title") or "?"
+        home = home.get("name") or "?"
     if isinstance(away, dict):
-        away = away.get("name") or away.get("title") or "?"
+        away = away.get("name") or "?"
     score_home = match.get("score_home") or match.get("home_score") or "?"
     score_away = match.get("score_away") or match.get("away_score") or "?"
     minute = match.get("minute") or match.get("time") or ""
@@ -50,12 +50,12 @@ def format_match(match):
 
 
 async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Recherche des matchs en cours...")
+    await update.message.reply_text("🔍 Recherche des matchs en cours...")
     matches = get_live_matches()
     if not matches:
-        await update.message.reply_text("Aucun match en direct pour le moment.")
+        await update.message.reply_text("❌ Aucun match en direct pour le moment.")
         return
-    lines = [f"Matchs en direct ({len(matches)})\n"]
+    lines = [f"📡 Matchs en direct ({len(matches)})\n"]
     for match in matches:
         lines.append(format_match(match))
         lines.append("")
@@ -63,31 +63,45 @@ async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = f"{BASE_URL}/api/events/?status=inprogress"
-    results = []
-
-    auth_formats = [
-        ("Token", {"Authorization": f"Token {BZZOIRO_KEY}"}),
-        ("Bearer", {"Authorization": f"Bearer {BZZOIRO_KEY}"}),
-        ("Api-Key", {"Authorization": f"Api-Key {BZZOIRO_KEY}"}),
-        ("URL param", {}),
-    ]
-
-    for name, headers in auth_formats:
+    # Test different statuses to see what exists
+    statuses = ["inprogress", "live", "finished", "scheduled", "1H", "2H", "HT", "NS"]
+    lines = []
+    for status in statuses:
         try:
-            if name == "URL param":
-                r = requests.get(f"{url}&api_key={BZZOIRO_KEY}", timeout=10)
-            else:
-                r = requests.get(url, headers=headers, timeout=10)
-            results.append(f"{name}: {r.status_code}\n{r.text[:100]}")
+            url = f"{BASE_URL}/api/events/?status={status}"
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            data = r.json()
+            count = data.get("count", "?")
+            lines.append(f"{status}: {count} matchs")
         except Exception as e:
-            results.append(f"{name}: ERROR {e}")
+            lines.append(f"{status}: erreur")
+    await update.message.reply_text("Résultats par statut:\n\n" + "\n".join(lines))
 
-    await update.message.reply_text("\n\n".join(results))
+
+async def debug2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Show raw structure of first available match
+    statuses = ["finished", "scheduled", "NS"]
+    for status in statuses:
+        try:
+            url = f"{BASE_URL}/api/events/?status={status}&limit=1"
+            r = requests.get(url, headers=HEADERS, timeout=10)
+            data = r.json()
+            results = data.get("results", [])
+            if results:
+                await update.message.reply_text(f"Exemple ({status}):\n{str(results[0])[:500]}")
+                return
+        except Exception as e:
+            pass
+    await update.message.reply_text("Aucun match trouve dans aucun statut.")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bot football\n\n/live - Matchs en direct\n/debug - Debug API")
+    await update.message.reply_text(
+        "👋 Bot Football\n\n"
+        "/live - Matchs en direct\n"
+        "/debug - Compter les matchs par statut\n"
+        "/debug2 - Voir la structure d un match"
+    )
 
 
 def main():
@@ -100,6 +114,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("live", live))
     app.add_handler(CommandHandler("debug", debug))
+    app.add_handler(CommandHandler("debug2", debug2))
 
     logger.info("Bot demarre...")
     app.run_polling()
