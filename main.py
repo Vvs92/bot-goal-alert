@@ -141,6 +141,27 @@ def api_get(endpoint, params=None, return_raw=False):
         return None
 
 
+def api_get_all(endpoint, params=None, max_pages=5):
+    """Recupere toutes les pages de resultats (pagination)."""
+    all_results = []
+    p = dict(params) if params else {}
+    page = 1
+    while page <= max_pages:
+        p["page"] = page
+        data = api_get(endpoint, p)
+        if not data:
+            break
+        results = _extract_results(data)
+        if not results:
+            break
+        all_results.extend(results)
+        # Si pas de page suivante, on arrete
+        if isinstance(data, dict) and not data.get("next"):
+            break
+        page += 1
+    return all_results
+
+
 # ================================================================
 # DIAGNOSTIC AU DEMARRAGE (version renforcee avec JSON brut)
 # ================================================================
@@ -326,33 +347,27 @@ def get_live_matches():
 
     results = []
 
-    # Tentative 1 : /api/live/
-    d = api_get("/api/live/")
-    if d:
-        r = _extract_results(d)
-        print("  [LIVE] /api/live/ -> " + str(len(r)) + " matchs", flush=True)
-        results.extend(r)
+    # Tentative 1 : /api/live/ (toutes pages)
+    r = api_get_all("/api/live/")
+    print("  [LIVE] /api/live/ -> " + str(len(r)) + " matchs", flush=True)
+    results.extend(r)
 
-    # Tentative 2 : /api/events/ avec chaque statut si live/ vide
+    # Tentative 2 : /api/events/ avec chaque statut (toutes pages)
     if not results:
         print("  [LIVE] Fallback /api/events/...", flush=True)
         for sv in ["inprogress", "1st_half", "2nd_half"]:
-            d2 = api_get("/api/events/", {"status": sv})
-            if d2:
-                r2 = _extract_results(d2)
-                if r2:
-                    print("  [LIVE] events/?status=" + sv
-                          + " -> " + str(len(r2)) + " matchs", flush=True)
-                results.extend(r2)
+            r2 = api_get_all("/api/events/", {"status": sv})
+            if r2:
+                print("  [LIVE] events/?status=" + sv
+                      + " -> " + str(len(r2)) + " matchs", flush=True)
+            results.extend(r2)
 
-    # Tentative 3 : /api/events/ sans filtre, on filtre manuellement
+    # Tentative 3 : /api/events/ sans filtre toutes pages, filtre manuel
     if not results:
         print("  [LIVE] Fallback /api/events/ sans filtre...", flush=True)
-        d3 = api_get("/api/events/")
-        if d3:
-            r3 = _extract_results(d3)
-            print("  [LIVE] /api/events/ total -> " + str(len(r3)) + " events", flush=True)
-            results.extend(r3)
+        r3 = api_get_all("/api/events/", max_pages=10)
+        print("  [LIVE] /api/events/ total -> " + str(len(r3)) + " events", flush=True)
+        results.extend(r3)
 
     total = len(results)
 
