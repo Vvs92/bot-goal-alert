@@ -52,7 +52,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 BASE_URL = "https://sports.bzzoiro.com"
 HEADERS = {"Authorization": "Token " + BZZOIRO_KEY}
 INTERVAL = 45
-SEP = "\u2501" * 22
+SEP = "━" * 22
 # Statuts live exacts (doc officielle Bzzoiro)
 LIVE_STATUSES = {"inprogress", "1st_half", "2nd_half"}
 # Toutes les ligues Bzzoiro (21 confirmees)
@@ -431,7 +431,7 @@ continue
 itype = str(inc.get("type", "")).lower()
 is_home = inc.get("is_home")
 if itype == "goal":
-entry = str(m) + "' \u26bd BUT"
+entry = str(m) + "' BUT"
 if is_home:
 h_pts += 5
 h_evts.append(entry)
@@ -591,8 +591,8 @@ if h_pwr > a_pwr * 1.3: return "home", h_name, m["h_eff"]
 elif a_pwr > h_pwr * 1.3: return "away", a_name, m["a_eff"]
 return "balanced", None, "neutre"
 def eff_str(e):
-if e == "efficace": return " \U0001f3af"
-if e == "inefficace": return " \U0001f4a8"
+if e == "efficace": return " "
+if e == "inefficace": return " "
 return ""
 # ================================================================
 # MESSAGE TELEGRAM
@@ -609,29 +609,29 @@ incidents = get_incidents(match)
 dom_side, dom_name, dom_eff = get_dominant(m, h_name, a_name)
 margin = score - threshold
 if margin >= 20 or score >= 80:
-lvl, emj = "\U0001f534 ALERTE MAX", "\U0001f534"
+lvl, emj = " ALERTE MAX", " "
 elif margin >= 10 or score >= 62:
-lvl, emj = "\U0001f7e0 FORTE PRESSION", "\U0001f7e0"
+lvl, emj = " FORTE PRESSION", " "
 else:
-lvl, emj = "\U0001f7e1 PRESSION", "\U0001f7e1"
+lvl, emj = " PRESSION", " "
 filled = int(score / 10)
-gauge = "\U0001f7e9" * filled + "\u2b1c" * (10 - filled)
+gauge = " " * filled + " " * (10 - filled)
 # Buteurs
 h_sc, a_sc = get_goal_scorers(incidents)
 scorers_block = ""
 if h_sc or a_sc:
-scorers_block = (SEP + "\n\u26bd BUTEURS:\n"
-+ " \U0001f539 " + h_name + ": "
-+ (", ".join(h_sc) if h_sc else "\u2014") + "\n"
-+ " \U0001f539 " + a_name + ": "
-+ (", ".join(a_sc) if a_sc else "\u2014") + "\n")
+scorers_block = (SEP + "\n + " + " BUTEURS:\n"
+" + h_name + ": "
++ (", ".join(h_sc) if h_sc else "—") + "\n"
+" + a_name + ": "
++ (", ".join(a_sc) if a_sc else "—") + "\n")
 # Stats
 def stat_line(tname, son, tot, cor, pos, eff, ratio):
 parts = []
 if son >= 1: parts.append(str(int(son)) + " tirs cadres")
 if tot >= 1: parts.append(str(int(tot)) + " tirs tot.")
 if cor >= 1: parts.append(str(int(cor)) + " corners")
-line = " \U0001f539 " + tname + ": " + (" | ".join(parts) if parts else "N/A")
+line = " " + tname + ": " + (" | ".join(parts) if parts else "N/A")
 extras = []
 if tot >= 3:
 extras.append("precision " + str(int(ratio*100)) + "%" + eff_str(eff))
@@ -648,9 +648,9 @@ m["a_pos"], m["a_eff"], m["a_ratio"])
 xg_block = ""
 if m["xg_ok"]:
 xg_t = m["h_xg"] + m["a_xg"]
-bh = "\U0001f7e2" if m["h_xg"] >= m["a_xg"] else "\U0001f534"
-ba = "\U0001f7e2" if m["a_xg"] > m["h_xg"] else "\U0001f534"
-xg_block = (SEP + "\n\U0001f4d0 xG ATTENDUS (ML):\n"
+bh = " " if m["h_xg"] >= m["a_xg"] else " "
+ba = " " if m["a_xg"] > m["h_xg"] else " "
+xg_block = (SEP + "\n xG ATTENDUS (ML):\n"
 + " " + bh + " " + h_name + ": " + str(round(m["h_xg"],2)) + "\n"
 + " " + ba + " " + a_name + ": " + str(round(m["a_xg"],2)) + "\n"
 + " Total: " + str(round(xg_t,2)) + "\n")
@@ -662,99 +662,99 @@ ph, pd, pa = m["p_home"], m["p_draw"], m["p_away"]
 if ph > 0 or pd > 0 or pa > 0:
 def bar(p):
 n = int(round(p / 100 * 8))
-return "\u2588" * n + "\u2591" * (8 - n)
+return "█" * n + "░" * (8 - n)
 ml_lines.append(" " + h_name[:13] + " " + str(round(ph,1)) + "% " + bar(ph))
 ml_lines.append(" Nul " + str(round(pd,1)) + "% " + bar(pd))
 ml_lines.append(" " + a_name[:13] + " " + str(round(pa,1)) + "% " + bar(pa))
 if m["p_over15"] > 0:
-ic = "\U0001f7e2" if m["p_over15"] >= 75 else "\U0001f7e1"
+ic = " " if m["p_over15"] >= 75 else " "
 ml_lines.append(" " + ic + " Over 1.5: " + str(round(m["p_over15"],1)) + "%"
-+ (" \u2713" if bool(pred.get("over_15_recommend")) else ""))
++ (" ✓" if bool(pred.get("over_15_recommend")) else ""))
 if m["p_over25"] > 0:
-ic = "\U0001f7e2" if m["p_over25"] >= 65 else ("\U0001f7e1" if m["p_over25"] >= 4
-ml_lines.append(" " + ic + " Over 2.5: " + str(round(m["p_over25"],1)) + "%"
-+ (" \u2713 ML" if m["rec_over25"] else ""))
+ic = " " if m["p_over25"] >= 65 else (" " if m["p_over25"] >= 45 else " ml_lines.append(" " + ic + " Over 2.5: " + str(round(m["p_over25"],1)) + "%"
++ (" ✓ ML" if m["rec_over25"] else ""))
+")
 if m["p_over35"] > 0:
-ic = "\U0001f7e2" if m["p_over35"] >= 55 else "\U0001f7e1"
+ic = " " if m["p_over35"] >= 55 else " "
 ml_lines.append(" " + ic + " Over 3.5: " + str(round(m["p_over35"],1)) + "%"
-+ (" \u2713" if bool(pred.get("over_35_recommend")) else ""))
++ (" ✓" if bool(pred.get("over_35_recommend")) else ""))
 if m["p_btts"] > 0:
-ic = "\U0001f7e2" if m["p_btts"] >= 60 else ("\U0001f7e1" if m["p_btts"] >= 45 el
+ic = " " if m["p_btts"] >= 60 else (" " if m["p_btts"] >= 45 else " ")
 ml_lines.append(" " + ic + " BTTS: " + str(round(m["p_btts"],1)) + "%"
-+ (" \u2713 ML" if m["rec_btts"] else ""))
++ (" ✓ ML" if m["rec_btts"] else ""))
 if m["favorite"] in ("H", "A") and m["fav_prob"] > 0:
 fn = h_name if m["favorite"] == "H" else a_name
-ml_lines.append(" \u2b50 Favori: " + fn
+ml_lines.append(" Favori: " + fn
 + " (" + str(round(m["fav_prob"],1)) + "%)"
-+ (" \u2713 Rec." if m["rec_fav"] else ""))
++ (" ✓ Rec." if m["rec_fav"] else ""))
 if m["mls"] and m["mls"] not in ("?", "None", ""):
-ml_lines.append(" \U0001f3af Score probable: " + m["mls"])
+ml_lines.append(" Score probable: " + m["mls"])
 if m["conf_pct"] > 0:
-ic = "\U0001f7e2" if m["conf_pct"] >= 65 else "\U0001f7e1"
+ic = " " if m["conf_pct"] >= 65 else " "
 ml_lines.append(" " + ic + " Confiance: " + str(round(m["conf_pct"],1)) + "%")
 if ml_lines:
-ml_block = (SEP + "\n\U0001f916 PREDICTIONS ML (CatBoost):\n"
+ml_block = (SEP + "\n PREDICTIONS ML (CatBoost):\n"
 + "\n".join(ml_lines) + "\n")
 # Activite recente
 rec_block = ""
 if m["h_rev"] or m["a_rev"]:
-rec_block = SEP + "\n\u26a1 MOMENTUM 12 DERNIERES MIN:\n"
+rec_block = SEP + "\n MOMENTUM 12 DERNIERES MIN:\n"
 if m["h_rev"]:
-rec_block += " \U0001f539 " + h_name + ": " + " | ".join(m["h_rev"]) + "\n"
+rec_block += " " + h_name + ": " + " | ".join(m["h_rev"]) + "\n"
 if m["a_rev"]:
-rec_block += " \U0001f539 " + a_name + ": " + " | ".join(m["a_rev"]) + "\n"
+rec_block += " " + a_name + ": " + " | ".join(m["a_rev"]) + "\n"
 if m["h_rec"] > m["a_rec"] * 1.4:
-rec_block += " \u27a1\ufe0f " + h_name + " en montee\n"
+rec_block += " ➡ " + h_name + " en montee\n"
 elif m["a_rec"] > m["h_rec"] * 1.4:
-rec_block += " \u27a1\ufe0f " + a_name + " en montee\n"
+rec_block += " ➡ " + a_name + " en montee\n"
 else:
-rec_block += " \u27a1\ufe0f Pression des deux cotes\n"
+rec_block += " ➡ Pression des deux cotes\n"
 # Recommandations
 recs = []
 if dom_name:
 if dom_eff == "efficace":
-recs.append(" \u2192 \u26bd Prochain but: " + dom_name + " (dom. + efficace) \U0
+recs.append(" → Prochain but: " + dom_name + " (dom. + efficace) ")
 elif dom_eff == "inefficace":
-recs.append(" \u2192 \u26bd " + dom_name + " domine mais imprecise \U0001f4a8")
+recs.append(" → " + dom_name + " domine mais imprecise ")
 else:
-recs.append(" \u2192 \u26bd Prochain but probable: " + dom_name)
+recs.append(" → Prochain but probable: " + dom_name)
 else:
-recs.append(" \u2192 \u26bd Match ouvert - buts des deux cotes")
+recs.append(" → Match ouvert - buts des deux cotes")
 if m["rec_over25"]:
-recs.append(" \u2192 \U0001f4c8 Over " + str(total_g) + ".5 buts (\U0001f916 ML rec.
+recs.append(" → Over " + str(total_g) + ".5 buts ( ML rec. "
 + str(round(m["p_over25"],0)) + "%)")
 elif m["p_over25"] >= 65:
-recs.append(" \u2192 \U0001f4c8 Over " + str(total_g) + ".5 buts ("
+recs.append(" → Over " + str(total_g) + ".5 buts ("
 + str(round(m["p_over25"],0)) + "% ML)")
 else:
-recs.append(" \u2192 \U0001f4c8 Over " + str(total_g) + ".5 buts dans le match")
+recs.append(" → Over " + str(total_g) + ".5 buts dans le match")
 if minute < 44:
 elif minute < 90:
-recs.append(" \u2192 \U0001f4c8 Over 0.5 buts 1ere MT")
-recs.append(" \u2192 \U0001f4c8 Over 0.5 buts 2eme MT")
+recs.append(" → Over 0.5 buts 1ere MT")
+recs.append(" → Over 0.5 buts 2eme MT")
 if m["rec_btts"]:
-recs.append(" \u2192 \U0001f3af BTTS (\U0001f916 ML rec. " + str(round(m["p_btts"],0
+recs.append(" → BTTS ( ML rec. " + str(round(m["p_btts"],0)) + "%)")
 elif m["p_btts"] >= 60:
-recs.append(" \u2192 \U0001f3af BTTS (" + str(round(m["p_btts"],0)) + "% ML)")
+recs.append(" → BTTS (" + str(round(m["p_btts"],0)) + "% ML)")
 if m["mls"] and m["mls"] not in ("?", "None", ""):
-recs.append(" \u2192 \U0001f3af Score exact: " + m["mls"] + " (Poisson ML)")
+recs.append(" → Score exact: " + m["mls"] + " (Poisson ML)")
 if m["xg_ok"] and (m["h_xg"] + m["a_xg"]) >= 3.5:
-recs.append(" \u2192 \U0001f4d0 xG total: " + str(round(m["h_xg"]+m["a_xg"],2))
+recs.append(" → xG total: " + str(round(m["h_xg"]+m["a_xg"],2))
 + " - match tres offensif")
-rec_section = SEP + "\n\U0001f4a1 QUOI JOUER:\n" + "\n".join(recs) + "\n"
+rec_section = SEP + "\n QUOI JOUER:\n" + "\n".join(recs) + "\n"
 return (emj + " " + lvl + " - BUT POTENTIEL\n"
 + SEP + "\n"
-+ "\U0001f3c6 " + league + "\n"
-+ "\u2694\ufe0f " + h_name + " \U0001f7e5 " + str(hg)
-+ " \u2014 " + str(ag) + " \U0001f7e6 " + a_name + "\n"
-+ "\u23f1\ufe0f " + str(minute) + "' | Momentum: " + str(score) + "/100\n"
++ " " + league + "\n"
++ "⚔ " + h_name + " " + str(hg)
++ " — " + str(ag) + " " + a_name + "\n"
++ " " + str(minute) + "' | Momentum: " + str(score) + "/100\n"
 + gauge + "\n"
 + scorers_block
 + SEP + "\n"
-+ "\U0001f4ca STATS LIVE:\n" + h_stat + "\n" + a_stat + "\n"
++ " STATS LIVE:\n" + h_stat + "\n" + a_stat + "\n"
 + xg_block + ml_block + rec_block + rec_section
 + SEP + "\n"
-+ "\u26a0\ufe0f Parie de facon responsable")
++ "⚠ Parie de facon responsable")
 # ================================================================
 # BOUCLE PRINCIPALE
 # ================================================================
@@ -766,7 +766,7 @@ print(" Diagnostic API en cours...", flush=True)
 diag = run_diagnostic()
 print(diag, flush=True)
 # Envoi en plusieurs messages si trop long (limite Telegram : 4096 chars)
-diag_header = "\U0001f7e2 BOT DEMARRE\n" + SEP + "\n"
+diag_header = " BOT DEMARRE\n" + SEP + "\n"
 full_msg = diag_header + diag + "\n" + SEP
 chunks = []
 while len(full_msg) > 4000:
