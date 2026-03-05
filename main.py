@@ -63,7 +63,7 @@ INTERVAL = 45
 SEP      = "━" * 22
 
 # Statuts live exacts (doc officielle Bzzoiro)
-LIVE_STATUSES = {"inprogress", "1st_half", "2nd_half"}
+LIVE_STATUSES = {"inprogress", "1st_half", "2nd_half", "halftime", "ht", "live", "progress", "playing", "in_play"}
 
 # Toutes les ligues Bzzoiro (21 confirmees)
 WATCHED_LEAGUES = {
@@ -167,146 +167,30 @@ def api_get_all(endpoint, params=None, max_pages=5):
 # ================================================================
 
 def run_diagnostic():
-    """
-    Teste tous les endpoints Bzzoiro.
-    Logue la structure JSON brute pour identifier tout probleme
-    de format ou de cle inattendue.
-    """
+    """Diagnostic rapide au demarrage."""
     lines = []
-    lines.append("=== DIAGNOSTIC BZZOIRO API ===")
-    lines.append("Heure: " + datetime.now().strftime("%H:%M:%S"))
-    lines.append("")
+    lines.append("⚙️ API OK | " + datetime.now().strftime("%H:%M:%S"))
 
-    # ---- Test /api/live/ ----
-    lines.append("--- /api/live/ ---")
-    data, raw = api_get("/api/live/", return_raw=True)
-    if data is None:
-        lines.append("ECHEC - pas de reponse (cle invalide ou reseau)")
-    else:
-        # Cles de premier niveau
-        top_keys = list(data.keys()) if isinstance(data, dict) else ["(liste " + str(len(data)) + " items)"]
-        lines.append("Top-level keys: " + str(top_keys))
+    # Matchs live
+    live = api_get_all("/api/live/")
+    lines.append("🔴 Live: " + str(len(live)) + " matchs")
+    for m in live[:5]:
+        lines.append("  " + _match_summary(m))
 
-        # Taille results
-        if isinstance(data, dict):
-            results = data.get("results", data.get("data", data.get("matches", [])))
-            if not isinstance(results, list):
-                # Peut-etre que c'est direct une liste
-                results = data if isinstance(data, list) else []
-        else:
-            results = data if isinstance(data, list) else []
-
-        lines.append("Nb matchs trouves: " + str(len(results)))
-
-        # Premier match en brut (troncature a 600 chars)
-        if results:
-            first = results[0]
-            raw_first = json.dumps(first, ensure_ascii=False)[:600]
-            lines.append("1er match (brut):")
-            lines.append(raw_first)
-        else:
-            # Affiche le JSON complet si vide (troncature 400 chars)
-            lines.append("Reponse complete (brut):")
-            lines.append(str(raw)[:400] if raw else "(vide)")
-
-    lines.append("")
-
-    # ---- Test /api/events/ sans filtre ----
-    lines.append("--- /api/events/ (sans filtre) ---")
-    data2, raw2 = api_get("/api/events/", return_raw=True)
-    if data2 is None:
-        lines.append("ECHEC")
-    else:
-        top_keys2 = list(data2.keys()) if isinstance(data2, dict) else ["(liste)"]
-        lines.append("Top-level keys: " + str(top_keys2))
-
-        if isinstance(data2, dict):
-            results2 = data2.get("results", data2.get("data", data2.get("matches", [])))
-            if not isinstance(results2, list):
-                results2 = data2 if isinstance(data2, list) else []
-        else:
-            results2 = data2 if isinstance(data2, list) else []
-
-        lines.append("Nb total events: " + str(len(results2)))
-
-        # Inventaire des statuts presents
+    # Total events aujourd'hui
+    d = api_get("/api/events/")
+    if d:
+        total = d.get("count", len(_extract_results(d)))
         statuts = {}
-        for m in results2:
+        for m in _extract_results(d):
             st = str(m.get("status", "?"))
             statuts[st] = statuts.get(st, 0) + 1
-        if statuts:
-            lines.append("Statuts presents: " + str(statuts))
-        else:
-            lines.append("Aucun event retourne - reponse brute:")
-            lines.append(str(raw2)[:400] if raw2 else "(vide)")
-
-        # Inventaire des league IDs
-        league_ids = {}
-        for m in results2:
-            lg = m.get("league", {})
-            if isinstance(lg, dict):
-                lid = lg.get("id", "?")
-            else:
-                lid = str(lg)
-            league_ids[lid] = league_ids.get(lid, 0) + 1
-        if league_ids:
-            lines.append("League IDs presents: " + str(league_ids))
-
-        # Premier event brut
-        if results2:
-            raw_e = json.dumps(results2[0], ensure_ascii=False)[:600]
-            lines.append("1er event (brut):")
-            lines.append(raw_e)
-
-    lines.append("")
-
-    # ---- Test /api/events/?status=inprogress ----
-    lines.append("--- /api/events/?status=inprogress ---")
-    d3, _ = api_get("/api/events/", {"status": "inprogress"}, return_raw=True)
-    if d3:
-        r3 = _extract_results(d3)
-        lines.append("Nb matchs: " + str(len(r3)))
-        for m in r3[:3]:
-            lines.append("  " + _match_summary(m))
+        lines.append("📅 Events today: " + str(total))
+        lines.append("   Statuts: " + str(statuts))
     else:
-        lines.append("ECHEC ou 0 resultats")
+        lines.append("❌ /api/events/ ECHEC")
 
-    # ---- Test /api/events/?status=1st_half ----
-    lines.append("--- /api/events/?status=1st_half ---")
-    d4, _ = api_get("/api/events/", {"status": "1st_half"}, return_raw=True)
-    if d4:
-        r4 = _extract_results(d4)
-        lines.append("Nb matchs: " + str(len(r4)))
-        for m in r4[:3]:
-            lines.append("  " + _match_summary(m))
-    else:
-        lines.append("ECHEC ou 0 resultats")
-
-    # ---- Test /api/events/?status=2nd_half ----
-    lines.append("--- /api/events/?status=2nd_half ---")
-    d5, _ = api_get("/api/events/", {"status": "2nd_half"}, return_raw=True)
-    if d5:
-        r5 = _extract_results(d5)
-        lines.append("Nb matchs: " + str(len(r5)))
-        for m in r5[:3]:
-            lines.append("  " + _match_summary(m))
-    else:
-        lines.append("ECHEC ou 0 resultats")
-
-    lines.append("")
-
-    # ---- Test /api/leagues/ ----
-    lines.append("--- /api/leagues/ ---")
-    dl, _ = api_get("/api/leagues/", return_raw=True)
-    if dl:
-        leagues = _extract_results(dl)
-        lines.append("Nb ligues: " + str(len(leagues)))
-        for lg in leagues[:10]:
-            lines.append("  id=" + str(lg.get("id","?"))
-                         + " " + str(lg.get("name","?")))
-    else:
-        lines.append("ECHEC")
-
+    lines.append("🏆 " + str(len(WATCHED_LEAGUES)) + " ligues surveillees")
     return "\n".join(lines)
 
 
@@ -378,11 +262,12 @@ def get_live_matches():
             lg  = m.get("league", {})
             lid = lg.get("id", "?") if isinstance(lg, dict) else "?"
             lnm = lg.get("name", "?") if isinstance(lg, dict) else "?"
-            print("    league_id=" + str(lid) + " [" + str(lnm) + "] "
+            print("    lid=" + str(lid) + " [" + str(lnm)[:12] + "] "
                   + str(m.get("home_team","?"))[:10]
                   + " vs " + str(m.get("away_team","?"))[:10]
-                  + " status=" + str(m.get("status","?"))
-                  + " min=" + str(m.get("current_minute","?")),
+                  + " | st='" + str(m.get("status","")) + "'"
+                  + " min=" + str(m.get("current_minute",""))
+                  + " per=" + str(m.get("period","")),
                   flush=True)
     else:
         print("  [LIVE] 0 matchs recus", flush=True)
@@ -390,10 +275,19 @@ def get_live_matches():
     # Filtre sur ligues + statuts live
     filtered = []
     for m in results:
-        lg     = m.get("league", {})
-        lid    = lg.get("id") if isinstance(lg, dict) else None
-        status = str(m.get("status", "")).lower().strip()
-        if lid in WATCHED_LEAGUES and status in LIVE_STATUSES:
+        lg      = m.get("league", {})
+        lid     = lg.get("id") if isinstance(lg, dict) else None
+        status  = str(m.get("status", "")).lower().strip()
+        minute  = m.get("current_minute")
+        period  = str(m.get("period", "")).upper()
+
+        is_live = (
+            status in LIVE_STATUSES
+            or (minute is not None and str(minute).isdigit() and int(minute) > 0)
+            or period in ("1T", "2T", "HT")
+        )
+
+        if lid in WATCHED_LEAGUES and is_live:
             filtered.append(m)
 
     live_cache[key] = (time.time(), filtered)
