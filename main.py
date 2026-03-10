@@ -422,19 +422,66 @@ def get_recent_activity(incidents, minute):
     return h_pts, a_pts, h_evts[-3:], a_evts[-3:]
 
 
+def build_message(match, m, pred, threshold):
+    league  = str(match.get("league", {}).get("name", "?"))
+    h_name  = str(match.get("home_team", "Dom"))
+    a_name  = str(match.get("away_team", "Ext"))
+    hg, ag  = get_score(match)
+    minute  = get_minute(match)
+    score   = m["score"]
+    total_g = hg + ag
+
+    margin = score - threshold
+    if margin >= 20 or score >= 80:
+        emj = "🔴🔴"
+    elif margin >= 10 or score >= 62:
+        emj = "🟠"
+    else:
+        emj = "🟡"
+
+    bets = []
+    if m["rec_over25"] or m["p_over25"] >= 65:
+        bets.append("Over " + str(total_g) + ".5 (" + str(int(m["p_over25"])) + "%)")
+    if m["rec_btts"] or m["p_btts"] >= 60:
+        bets.append("BTTS (" + str(int(m["p_btts"])) + "%)")
+    if m["favorite"] in ("H", "A") and m["rec_fav"]:
+        fn = h_name if m["favorite"] == "H" else a_name
+        bets.append(fn + " gagne (" + str(int(m["fav_prob"])) + "%)")
+    if minute < 44:
+        bets.append("Over 0.5 MT1")
+    elif minute < 85:
+        bets.append("Over 0.5 MT2")
+    bets_str = " | ".join(bets) if bets else "Aucun signal clair"
+
+    stats = (str(int(m["h_son"])) + "/" + str(int(m["a_son"])) + " tirs cadres"
+             + " | " + str(int(m["h_cor"])) + "/" + str(int(m["a_cor"])) + " corners")
+
+    # Indicateur adresse equipe dominante
+    dom_eff = ""
+    if m["h_son"] + m["h_tot"] > m["a_son"] + m["a_tot"]:
+        if m["h_eff"] == "efficace":
+            dom_eff = " | " + h_name[:10] + " adroit 🎯"
+        elif m["h_eff"] == "inefficace":
+            dom_eff = " | " + h_name[:10] + " imprecis 💨"
+    elif m["a_son"] + m["a_tot"] > m["h_son"] + m["h_tot"]:
+        if m["a_eff"] == "efficace":
+            dom_eff = " | " + a_name[:10] + " adroit 🎯"
+        elif m["a_eff"] == "inefficace":
+            dom_eff = " | " + a_name[:10] + " imprecis 💨"
+
+    lines = [
+        emj + " " + league + " | " + str(minute) + "min | Momentum " + str(score) + "/100",
+        h_name + " " + str(hg) + " - " + str(ag) + " " + a_name,
+        "📊 " + stats + dom_eff,
+        "💡 " + bets_str,
+        "⚠️ Parie de facon responsable",
+    ]
+    return "\n".join(lines)
+
+
 # ================================================================
-# CALCUL MOMENTUM (0-100)
+# MOMENTUM CHIRURGICAL - remplace compute_momentum
 # ================================================================
-
-def calc_efficiency(shots_on, shots_total):
-    if shots_total < 3:
-        return 0.0, "neutre", 0
-    r = shots_on / shots_total
-    if r >= 0.50:   return r, "efficace",   +10
-    elif r >= 0.30: return r, "neutre",       0
-    else:           return r, "inefficace",  -8
-
-
 def compute_momentum(match, pred):
     minute    = get_minute(match)
     incidents = get_incidents(match)
@@ -459,10 +506,8 @@ def compute_momentum(match, pred):
     p_home   = sf(pred.get("prob_home_win"))
     p_draw   = sf(pred.get("prob_draw"))
     p_away   = sf(pred.get("prob_away_win"))
-
     conf_raw = sf(pred.get("confidence"))
     conf_pct = conf_raw * 100 if conf_raw <= 1.0 else conf_raw
-
     rec_over25 = bool(pred.get("over_25_recommend"))
     rec_btts   = bool(pred.get("btts_recommend"))
     rec_fav    = bool(pred.get("favorite_recommend"))
@@ -470,64 +515,84 @@ def compute_momentum(match, pred):
     fav_prob   = sf(pred.get("favorite_prob"))
     mls        = str(pred.get("most_likely_score") or "")
 
-    raw = 0
+    hg, ag = get_score(match)
+    diff   = abs(hg - ag)
+    raw    = 0
 
-    # Tirs cadres
-    son_t = h_son + a_son
-    if son_t >= 14:   raw += 22
-    elif son_t >= 10: raw += 17
-    elif son_t >= 7:  raw += 12
-    elif son_t >= 4:  raw += 7
-    elif son_t >= 2:  raw += 3
+    # === SIGNAL 1 : Tirs cadres (signal qualite le plus fort) ===
+    # On regarde surtout l'equipe qui domine
+    dom_son = max(h_son, a_son)
+    if dom_son >= 8:    raw += 30
+    elif dom_son >= 6:  raw += 22
+    elif dom_son >= 4:  raw += 14
+    elif dom_son >= 2:  raw += 7
+    elif dom_son >= 1:  raw += 3
 
-    # Tirs totaux
-    tot_t = h_tot + a_tot
-    if tot_t >= 25:   raw += 12
-    elif tot_t >= 18: raw += 9
-    elif tot_t >= 12: raw += 6
-    elif tot_t >= 7:  raw += 3
+    # Equilibre ou domination nette
+    son_gap = abs(h_son - a_son)
+    if son_gap >= 4:    raw += 8   # domination nette = signal plus fort
+    elif son_gap <= 1:  raw += 4   # match ouvert = aussi intéressant
 
-    # Corners
-    cor_t = h_cor + a_cor
-    if cor_t >= 14:   raw += 9
-    elif cor_t >= 9:  raw += 7
-    elif cor_t >= 6:  raw += 5
-    elif cor_t >= 3:  raw += 2
+    # === SIGNAL 2 : Volume de tirs ===
+    dom_tot = max(h_tot, a_tot)
+    if dom_tot >= 15:   raw += 12
+    elif dom_tot >= 10: raw += 8
+    elif dom_tot >= 6:  raw += 4
 
-    # xG ML
-    xg_t = h_xg + a_xg
+    # === SIGNAL 3 : Corners (pression territoriale) ===
+    dom_cor = max(h_cor, a_cor)
+    if dom_cor >= 8:    raw += 10
+    elif dom_cor >= 5:  raw += 6
+    elif dom_cor >= 3:  raw += 3
+
+    # === SIGNAL 4 : Adresse (tirs cadres / tirs totaux) ===
+    h_ratio, h_eff, _ = calc_efficiency(h_son, h_tot)
+    a_ratio, a_eff, _ = calc_efficiency(a_son, a_tot)
+    dom_eff_val = h_eff if h_son >= a_son else a_eff
+    dom_ratio   = h_ratio if h_son >= a_son else a_ratio
+    if dom_eff_val == "efficace":
+        raw += 12   # equipe adroite = signal fort de but imminent
+    elif dom_eff_val == "inefficace":
+        raw -= 5    # beaucoup de tirs mais rate = moins fiable
+
+    # === SIGNAL 5 : Fenetre temporelle (quand alerter) ===
+    # Les meilleurs moments pour parier : 25-40' et 60-78'
+    if 25 <= minute <= 40:
+        raw += 10   # prime 1ere periode active
+    elif 60 <= minute <= 78:
+        raw += 12   # prime 2eme periode active = meilleure fenetre
+    elif minute > 80:
+        raw -= 20   # penalite forte apres 80' (trop tard)
+    elif minute < 15:
+        raw -= 10   # trop tot, pas assez d'info
+
+    # === SIGNAL 6 : Contexte scoreline ===
+    if diff == 0:
+        raw += 8    # match nul = les deux equipes poussent
+    elif diff == 1:
+        raw += 5    # equipe qui perd pousse
+    elif diff >= 3:
+        raw -= 15   # match plie = peu d'interet
+
+    # === SIGNAL 7 : ML predictions ===
     if xg_ok:
-        if xg_t >= 4.0:   raw += 22
-        elif xg_t >= 3.0: raw += 18
-        elif xg_t >= 2.0: raw += 14
-        elif xg_t >= 1.2: raw += 9
-        elif xg_t >= 0.6: raw += 5
-        elif xg_t >= 0.2: raw += 2
+        xg_t = h_xg + a_xg
+        if xg_t >= 3.0:   raw += 15
+        elif xg_t >= 2.0: raw += 10
+        elif xg_t >= 1.2: raw += 5
+    if p_over25 >= 75:    raw += 8
+    elif p_over25 >= 60:  raw += 4
+    if rec_over25:        raw += 5
+    if rec_btts:          raw += 3
 
-    # Over 2.5 ML
-    if p_over25 >= 85:   raw += 10
-    elif p_over25 >= 70: raw += 7
-    elif p_over25 >= 55: raw += 4
-    elif p_over25 >= 40: raw += 1
-
-    # Recommandations ML
-    if rec_over25: raw += 6
-    if rec_btts:   raw += 4
-
-    # Efficacite
-    h_ratio, h_eff, h_bonus = calc_efficiency(h_son, h_tot)
-    a_ratio, a_eff, a_bonus = calc_efficiency(a_son, a_tot)
-    raw += h_bonus if h_tot >= a_tot else a_bonus
-
-    # Activite recente
+    # === SIGNAL 8 : Activite recente (buts dans les 10 dernieres min) ===
     h_rec, a_rec, h_rev, a_rev = get_recent_activity(incidents, minute)
     rec_t = h_rec + a_rec
-    if rec_t >= 10:   raw += 8
-    elif rec_t >= 5:  raw += 5
-    elif rec_t >= 2:  raw += 2
+    if rec_t >= 10:  raw += 10
+    elif rec_t >= 5: raw += 5
 
     return {
-        "score":    min(raw, 100),
+        "score":    min(max(raw, 0), 100),
         "h_son": h_son,  "a_son": a_son,
         "h_tot": h_tot,  "a_tot": a_tot,
         "h_cor": h_cor,  "a_cor": a_cor,
@@ -552,243 +617,33 @@ def compute_momentum(match, pred):
 
 
 # ================================================================
-# SEUIL ADAPTATIF
+# SEUIL ADAPTATIF CHIRURGICAL
 # ================================================================
-
 def get_threshold(minute, hg, ag, m):
-    base = 38
+    # Seuil de base plus strict pour reduire les fausses alertes
+    base = 45
 
-    if minute >= 83:    base -= 16
-    elif minute >= 76:  base -= 12
-    elif minute >= 68:  base -= 8
-    elif minute >= 58:  base -= 5
-    elif minute >= 47:  base -= 2
-    elif minute < 12:   base += 12
-    elif minute < 22:   base += 7
-    elif minute < 32:   base += 3
+    # Fenetres optimales = seuil reduit
+    if 60 <= minute <= 78:    base -= 10
+    elif 25 <= minute <= 40:  base -= 6
+    elif minute > 80:         base += 25   # bloquer apres 80' (cutoff 85 en aval)
+    elif minute < 15:         base += 15
 
     diff = abs(hg - ag)
-    if diff == 0:
-        if minute >= 70:   base -= 8
-        elif minute >= 55: base -= 4
-    elif diff == 1:
-        if minute >= 70:   base -= 8
-        elif minute >= 55: base -= 5
-    elif diff == 2:        base += 4
-    elif diff >= 3:        base += 12
+    if diff == 0:             base -= 5
+    elif diff == 1:           base -= 3
+    elif diff >= 3:           base += 20   # match plie, on ne joue pas
 
-    if m["p_over25"] >= 75:   base -= 6
-    elif m["p_over25"] >= 60: base -= 3
-    if m["rec_over25"]:       base -= 5
-    if m["conf_pct"] >= 70:   base -= 4
-    elif m["conf_pct"] >= 50: base -= 2
+    # ML boost
+    if m["p_over25"] >= 75:   base -= 5
+    if m["rec_over25"]:       base -= 4
+    if m["conf_pct"] >= 70:   base -= 3
 
-    dom_eff = m["h_eff"] if hg <= ag else m["a_eff"]
-    if dom_eff == "efficace":     base -= 4
-    elif dom_eff == "inefficace": base += 5
+    # Adresse
+    if m["h_eff"] == "efficace" or m["a_eff"] == "efficace":
+        base -= 4
 
-    return max(28, min(base, 68))
-
-
-# ================================================================
-# DOMINANT
-# ================================================================
-
-def get_dominant(m, h_name, a_name):
-    h_pwr = m["h_son"]*5 + m["h_tot"]*2 + m["h_cor"]*2 + m["h_xg"]*12
-    a_pwr = m["a_son"]*5 + m["a_tot"]*2 + m["a_cor"]*2 + m["a_xg"]*12
-    if h_pwr > a_pwr * 1.3:   return "home", h_name, m["h_eff"]
-    elif a_pwr > h_pwr * 1.3: return "away", a_name, m["a_eff"]
-    return "balanced", None, "neutre"
-
-
-def eff_str(e):
-    if e == "efficace":   return " 🎯"
-    if e == "inefficace": return " 💨"
-    return ""
-
-
-# ================================================================
-# MESSAGE TELEGRAM
-# ================================================================
-
-def build_message(match, m, pred, threshold):
-    league  = str(match.get("league", {}).get("name", "?"))
-    h_name  = str(match.get("home_team", "Domicile"))
-    a_name  = str(match.get("away_team", "Visiteur"))
-    hg, ag  = get_score(match)
-    minute  = get_minute(match)
-    score   = m["score"]
-    total_g = hg + ag
-    incidents = get_incidents(match)
-
-    dom_side, dom_name, dom_eff = get_dominant(m, h_name, a_name)
-
-    margin = score - threshold
-    if margin >= 20 or score >= 80:
-        lvl, emj = "🔴 ALERTE MAX", "🔴"
-    elif margin >= 10 or score >= 62:
-        lvl, emj = "🟠 FORTE PRESSION", "🟠"
-    else:
-        lvl, emj = "🟡 PRESSION", "🟡"
-
-    filled = int(score / 10)
-    gauge  = "🟩" * filled + "⬜" * (10 - filled)
-
-    # Buteurs
-    h_sc, a_sc = get_goal_scorers(incidents)
-    scorers_block = ""
-    if h_sc or a_sc:
-        scorers_block = (SEP + "\n⚽ BUTEURS:\n"
-                         + "  🔹 " + h_name + ": "
-                         + (", ".join(h_sc) if h_sc else "—") + "\n"
-                         + "  🔹 " + a_name + ": "
-                         + (", ".join(a_sc) if a_sc else "—") + "\n")
-
-    # Stats
-    def stat_line(tname, son, tot, cor, pos, eff, ratio):
-        parts = []
-        if son >= 1: parts.append(str(int(son)) + " tirs cadres")
-        if tot >= 1: parts.append(str(int(tot)) + " tirs tot.")
-        if cor >= 1: parts.append(str(int(cor)) + " corners")
-        line = "  🔹 " + tname + ": " + (" | ".join(parts) if parts else "N/A")
-        extras = []
-        if tot >= 3:
-            extras.append("precision " + str(int(ratio*100)) + "%" + eff_str(eff))
-        if pos > 0:
-            extras.append("poss. " + str(int(pos)) + "%")
-        if extras:
-            line += "\n    (" + " | ".join(extras) + ")"
-        return line
-
-    h_stat = stat_line(h_name, m["h_son"], m["h_tot"], m["h_cor"],
-                       m["h_pos"], m["h_eff"], m["h_ratio"])
-    a_stat = stat_line(a_name, m["a_son"], m["a_tot"], m["a_cor"],
-                       m["a_pos"], m["a_eff"], m["a_ratio"])
-
-    # xG
-    xg_block = ""
-    if m["xg_ok"]:
-        xg_t = m["h_xg"] + m["a_xg"]
-        bh   = "🟢" if m["h_xg"] >= m["a_xg"] else "🔴"
-        ba   = "🟢" if m["a_xg"] > m["h_xg"] else "🔴"
-        xg_block = (SEP + "\n📐 xG ATTENDUS (ML):\n"
-                    + "  " + bh + " " + h_name + ": " + str(round(m["h_xg"],2)) + "\n"
-                    + "  " + ba + " " + a_name + ": " + str(round(m["a_xg"],2)) + "\n"
-                    + "  Total: " + str(round(xg_t,2)) + "\n")
-
-    # ML
-    ml_block = ""
-    if pred:
-        ml_lines = []
-        ph, pd, pa = m["p_home"], m["p_draw"], m["p_away"]
-        if ph > 0 or pd > 0 or pa > 0:
-            def bar(p):
-                n = int(round(p / 100 * 8))
-                return "█" * n + "░" * (8 - n)
-            ml_lines.append("  " + h_name[:13] + " " + str(round(ph,1)) + "% " + bar(ph))
-            ml_lines.append("  Nul          " + str(round(pd,1)) + "% " + bar(pd))
-            ml_lines.append("  " + a_name[:13] + " " + str(round(pa,1)) + "% " + bar(pa))
-
-        if m["p_over15"] > 0:
-            ic = "🟢" if m["p_over15"] >= 75 else "🟡"
-            ml_lines.append("  " + ic + " Over 1.5: " + str(round(m["p_over15"],1)) + "%"
-                            + (" ✓" if bool(pred.get("over_15_recommend")) else ""))
-        if m["p_over25"] > 0:
-            ic = "🟢" if m["p_over25"] >= 65 else ("🟡" if m["p_over25"] >= 45 else "🔴")
-            ml_lines.append("  " + ic + " Over 2.5: " + str(round(m["p_over25"],1)) + "%"
-                            + (" ✓ ML" if m["rec_over25"] else ""))
-        if m["p_over35"] > 0:
-            ic = "🟢" if m["p_over35"] >= 55 else "🟡"
-            ml_lines.append("  " + ic + " Over 3.5: " + str(round(m["p_over35"],1)) + "%"
-                            + (" ✓" if bool(pred.get("over_35_recommend")) else ""))
-        if m["p_btts"] > 0:
-            ic = "🟢" if m["p_btts"] >= 60 else ("🟡" if m["p_btts"] >= 45 else "🔴")
-            ml_lines.append("  " + ic + " BTTS: " + str(round(m["p_btts"],1)) + "%"
-                            + (" ✓ ML" if m["rec_btts"] else ""))
-        if m["favorite"] in ("H", "A") and m["fav_prob"] > 0:
-            fn = h_name if m["favorite"] == "H" else a_name
-            ml_lines.append("  ⭐ Favori: " + fn
-                            + " (" + str(round(m["fav_prob"],1)) + "%)"
-                            + (" ✓ Rec." if m["rec_fav"] else ""))
-        if m["mls"] and m["mls"] not in ("?", "None", ""):
-            ml_lines.append("  🎯 Score probable: " + m["mls"])
-        if m["conf_pct"] > 0:
-            ic = "🟢" if m["conf_pct"] >= 65 else "🟡"
-            ml_lines.append("  " + ic + " Confiance: " + str(round(m["conf_pct"],1)) + "%")
-
-        if ml_lines:
-            ml_block = (SEP + "\n🤖 PREDICTIONS ML (CatBoost):\n"
-                        + "\n".join(ml_lines) + "\n")
-
-    # Activite recente
-    rec_block = ""
-    if m["h_rev"] or m["a_rev"]:
-        rec_block = SEP + "\n⚡ MOMENTUM 12 DERNIERES MIN:\n"
-        if m["h_rev"]:
-            rec_block += "  🔹 " + h_name + ": " + " | ".join(m["h_rev"]) + "\n"
-        if m["a_rev"]:
-            rec_block += "  🔹 " + a_name + ": " + " | ".join(m["a_rev"]) + "\n"
-        if m["h_rec"] > m["a_rec"] * 1.4:
-            rec_block += "  ➡ " + h_name + " en montee\n"
-        elif m["a_rec"] > m["h_rec"] * 1.4:
-            rec_block += "  ➡ " + a_name + " en montee\n"
-        else:
-            rec_block += "  ➡ Pression des deux cotes\n"
-
-    # Recommandations
-    recs = []
-    if dom_name:
-        if dom_eff == "efficace":
-            recs.append("  → ⚽ Prochain but: " + dom_name + " (dom. + efficace) 🎯")
-        elif dom_eff == "inefficace":
-            recs.append("  → ⚽ " + dom_name + " domine mais imprecise 💨")
-        else:
-            recs.append("  → ⚽ Prochain but probable: " + dom_name)
-    else:
-        recs.append("  → ⚽ Match ouvert - buts des deux cotes")
-
-    if m["rec_over25"]:
-        recs.append("  → 📈 Over " + str(total_g) + ".5 buts (🤖 ML rec. "
-                    + str(round(m["p_over25"],0)) + "%)")
-    elif m["p_over25"] >= 65:
-        recs.append("  → 📈 Over " + str(total_g) + ".5 buts ("
-                    + str(round(m["p_over25"],0)) + "% ML)")
-    else:
-        recs.append("  → 📈 Over " + str(total_g) + ".5 buts dans le match")
-
-    if minute < 44:
-        recs.append("  → 📈 Over 0.5 buts 1ere MT")
-    elif minute < 90:
-        recs.append("  → 📈 Over 0.5 buts 2eme MT")
-
-    if m["rec_btts"]:
-        recs.append("  → 🎯 BTTS (🤖 ML rec. " + str(round(m["p_btts"],0)) + "%)")
-    elif m["p_btts"] >= 60:
-        recs.append("  → 🎯 BTTS (" + str(round(m["p_btts"],0)) + "% ML)")
-
-    if m["mls"] and m["mls"] not in ("?", "None", ""):
-        recs.append("  → 🎯 Score exact: " + m["mls"] + " (Poisson ML)")
-
-    if m["xg_ok"] and (m["h_xg"] + m["a_xg"]) >= 3.5:
-        recs.append("  → 📐 xG total: " + str(round(m["h_xg"]+m["a_xg"],2))
-                    + " - match tres offensif")
-
-    rec_section = SEP + "\n💡 QUOI JOUER:\n" + "\n".join(recs) + "\n"
-
-    return (emj + " " + lvl + " - BUT POTENTIEL\n"
-            + SEP + "\n"
-            + "🏆 " + league + "\n"
-            + "⚔  " + h_name + " 🟥 " + str(hg)
-            + "  —  " + str(ag) + " 🟦 " + a_name + "\n"
-            + "⏱  " + str(minute) + "' | Momentum: " + str(score) + "/100\n"
-            + gauge + "\n"
-            + scorers_block
-            + SEP + "\n"
-            + "📊 STATS LIVE:\n" + h_stat + "\n" + a_stat + "\n"
-            + xg_block + ml_block + rec_block + rec_section
-            + SEP + "\n"
-            + "⚠ Parie de facon responsable")
+    return max(30, min(base, 75))
 
 
 # ================================================================
@@ -861,6 +716,8 @@ async def run_forever():
                               + str(int(m["a_cor"]))
                               + xg_s, flush=True)
 
+                        if minute > 85:
+                            continue
                         alert_key = str(event_id) + "_" + str(minute // 15)
                         if score >= threshold and alert_key not in alerts_sent:
                             alerts_sent[alert_key] = True
