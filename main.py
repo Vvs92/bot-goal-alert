@@ -188,10 +188,15 @@ def get_prediction(event_id):
 
 
 def analyse(match, pred):
+    """
+    Evalue la probabilite qu'un but tombe dans le match.
+    On combine les stats des DEUX equipes pour avoir
+    une vision globale du danger dans le match.
+    En bonus on identifie quelle equipe est la plus dangereuse.
+    """
     hg, ag = get_score(match)
     diff   = abs(hg - ag)
 
-    # Match plie = aucun interet
     if diff >= 3:
         return None
 
@@ -215,119 +220,89 @@ def analyse(match, pred):
     favorite   = str(pred.get("favorite") or "")
     fav_prob   = sf(pred.get("favorite_prob"))
 
-    def team_score(son, tot, cor, pos, xg):
-        score = 0.0
-
-        # SIGNAL 1 : Tirs cadres
-        if son >= 8:    score += 40
-        elif son >= 6:  score += 32
-        elif son >= 4:  score += 22
-        elif son >= 3:  score += 14
-        elif son >= 2:  score += 7
-
-        # SIGNAL 2 : Adresse via xG (si dispo) sinon ratio
-        if xg_ok and xg > 0:
-            if xg >= 2.0:    score += 25
-            elif xg >= 1.5:  score += 20
-            elif xg >= 1.0:  score += 14
-            elif xg >= 0.6:  score += 8
-            elif xg >= 0.3:  score += 3
-        elif tot >= 3:
-            ratio = son / tot
-            if ratio >= 0.55:   score += 20
-            elif ratio >= 0.40: score += 12
-            elif ratio >= 0.25: score += 5
-
-        # SIGNAL 3 : Corners
-        if cor >= 9:    score += 22
-        elif cor >= 7:  score += 17
-        elif cor >= 5:  score += 12
-        elif cor >= 4:  score += 8
-        elif cor >= 2:  score += 3
-
-        # SIGNAL 4 : Possession
-        if pos >= 72:   score += 16
-        elif pos >= 66: score += 12
-        elif pos >= 60: score += 7
-
-        return score
-
-    h_score = team_score(h_son, h_tot, h_cor, h_pos, h_xg)
-    a_score = team_score(a_son, a_tot, a_cor, a_pos, a_xg)
-
-    # Score combine du match (les deux equipes)
-    match_score = h_score + a_score
-
-    # Criteres minimaux sur le MATCH ENTIER (pas par equipe)
-    # Au moins 3 tirs cadres au total ET 5 corners au total ET xG > 0.5
+    # === CRITERES MINIMAUX DU MATCH (pas par equipe) ===
+    # Le match doit montrer un danger global suffisant
     total_son = h_son + a_son
     total_cor = h_cor + a_cor
     total_xg  = h_xg + a_xg
 
-    if total_son < 3:  return None
-    if total_cor < 5:  return None
-    if xg_ok and total_xg < 0.5: return None
-    if h_score == 0 and a_score == 0: return None
+    if total_son < 3:   return None   # moins de 3 tirs cadres au total = match endormi
+    if total_cor < 4:   return None   # moins de 4 corners = pas de pression
+    if xg_ok and total_xg < 0.4: return None  # xG trop bas = pas de danger reel
 
-    # Equipe dominante
-    # Le score du match sert de base au momentum
-    _ = match_score  # utilise pour le momentum global
+    # === SCORE DE DANGER DU MATCH (0-100) ===
+    danger = 0.0
 
-    if h_score > a_score * 1.3:
-        dom_side  = "home"
-        dom_score = h_score
-        dom_son   = h_son
-        dom_cor   = h_cor
-        dom_pos   = h_pos
-        dom_xg    = h_xg
-        dom_ratio = h_son / h_tot if h_tot >= 3 else 0
-    elif a_score > h_score * 1.3:
-        dom_side  = "away"
-        dom_score = a_score
-        dom_son   = a_son
-        dom_cor   = a_cor
-        dom_pos   = a_pos
-        dom_xg    = a_xg
-        dom_ratio = a_son / a_tot if a_tot >= 3 else 0
-    else:
-        dom_side  = "balanced"
-        dom_score = max(h_score, a_score)
-        dom_son   = max(h_son, a_son)
-        dom_cor   = max(h_cor, a_cor)
-        dom_pos   = max(h_pos, a_pos)
-        dom_xg    = max(h_xg, a_xg)
-        dom_ratio = 0
+    # SIGNAL 1 : Tirs cadres totaux
+    if total_son >= 10:  danger += 35
+    elif total_son >= 7: danger += 28
+    elif total_son >= 5: danger += 20
+    elif total_son >= 3: danger += 12
 
-    # Momentum final : base sur pression dominante + bonus match actif
-    momentum = min(dom_score, 70)
-    # Bonus si les deux equipes poussent (match ouvert)
-    if h_score > 5 and a_score > 5:
-        momentum += min(int((h_score + a_score) / 10), 10)
+    # SIGNAL 2 : xG total (qualite des occasions)
+    if xg_ok:
+        if total_xg >= 3.0:   danger += 30
+        elif total_xg >= 2.0: danger += 24
+        elif total_xg >= 1.5: danger += 18
+        elif total_xg >= 1.0: danger += 12
+        elif total_xg >= 0.5: danger += 6
 
-    # Bonus score serre
-    if diff == 0:   momentum += 8
-    elif diff == 1: momentum += 4
+    # SIGNAL 3 : Corners totaux (pression dans les surfaces)
+    if total_cor >= 12:  danger += 20
+    elif total_cor >= 9: danger += 16
+    elif total_cor >= 7: danger += 12
+    elif total_cor >= 5: danger += 8
+    elif total_cor >= 4: danger += 4
+
+    # SIGNAL 4 : Possession de l'equipe qui domine
+    dom_pos = max(h_pos, a_pos)
+    if dom_pos >= 70:   danger += 12
+    elif dom_pos >= 65: danger += 8
+    elif dom_pos >= 60: danger += 5
+
+    # SIGNAL 5 : Bonus si les deux equipes sont dangereuses
+    # (match ouvert = plus de buts probables)
+    if h_son >= 2 and a_son >= 2:
+        danger += 8
+    if h_xg >= 0.3 and a_xg >= 0.3:
+        danger += 6
 
     # Bonus ML
-    if p_over25 >= 72:              momentum += 6
-    if rec_over25:                  momentum += 4
-    if xg_ok and (h_xg + a_xg) >= 2.5: momentum += 5
+    if p_over25 >= 72:  danger += 6
+    if rec_over25:      danger += 4
+    if rec_btts:        danger += 3
 
-    momentum = min(max(int(momentum), 0), 100)
+    # Bonus score serre
+    if diff == 0:   danger += 8
+    elif diff == 1: danger += 4
+
+    danger = min(max(int(danger), 0), 100)
+
+    # === BONUS : equipe la plus dangereuse ===
+    h_danger = h_son * 8 + h_xg * 15 + h_cor * 3
+    a_danger = a_son * 8 + a_xg * 15 + a_cor * 3
+
+    if h_danger > a_danger * 1.4:
+        likely_scorer = "home"
+        likely_xg     = h_xg
+    elif a_danger > h_danger * 1.4:
+        likely_scorer = "away"
+        likely_xg     = a_xg
+    else:
+        likely_scorer = "both"
+        likely_xg     = max(h_xg, a_xg)
 
     return {
-        "momentum":  momentum,
-        "dom_side":  dom_side,
-        "dom_score": dom_score,
-        "dom_son":   dom_son,
-        "dom_cor":   dom_cor,
-        "dom_pos":   dom_pos,
-        "dom_xg":    dom_xg,
-        "dom_ratio": dom_ratio,
+        "danger":        danger,
+        "likely_scorer": likely_scorer,
+        "likely_xg":     likely_xg,
+        "total_son":     total_son,
+        "total_cor":     total_cor,
+        "total_xg":      total_xg,
         "h_son": h_son, "a_son": a_son,
         "h_cor": h_cor, "a_cor": a_cor,
         "h_pos": h_pos, "a_pos": a_pos,
-        "h_xg": h_xg,  "a_xg": a_xg,
+        "h_xg":  h_xg,  "a_xg":  a_xg,
         "p_over25":   p_over25,
         "p_btts":     p_btts,
         "rec_over25": rec_over25,
@@ -336,95 +311,23 @@ def analyse(match, pred):
         "favorite":   favorite,
         "fav_prob":   fav_prob,
         "xg_ok":      xg_ok,
-        "diff":       diff,
+        "diff":        diff,
     }
 
 
 def get_threshold(a, minute, diff):
-    # Seuil de base strict
-    base = 55
+    base = 52
 
-    # Ajustement selon score
-    if diff == 0 and minute >= 60:   base -= 10
-    elif diff == 0:                  base -= 5
-    elif diff == 1 and minute >= 70: base -= 8
-    elif diff == 1:                  base -= 4
+    if diff == 0 and minute >= 60:    base -= 10
+    elif diff == 0:                   base -= 5
+    elif diff == 1 and minute >= 70:  base -= 8
+    elif diff == 1:                   base -= 4
 
-    # Boost ML
-    if a["rec_over25"]:              base -= 4
-    if a["p_over25"] >= 75:          base -= 3
-    if a["xg_ok"] and a["dom_xg"] >= 1.2: base -= 4
+    if a["rec_over25"]:               base -= 4
+    if a["p_over25"] >= 75:           base -= 3
+    if a["xg_ok"] and a["total_xg"] >= 1.5: base -= 4
 
-    return max(35, min(base, 70))
-
-
-def check_second_half_goals(match, a, minute, hg, ag):
-    """
-    Scenario special : alerte 'Plus de buts en 2eme MT'
-    Conditions :
-    - Score 0-0 avec pression forte, OU
-    - Equipe domicile mene 1-0 mais se fait dominer apres 35min
-    - Equipe domicile perd 0-1 entre 35-45min avec occasions
-    Retourne un message ou None
-    """
-    # Accepter aussi la mi-temps exacte (statut halftime, minute=45)
-    is_halftime = str(match.get("period", "")).upper() in ("HT", "HALFTIME") or str(match.get("status", "")).lower() in ("halftime", "ht")
-    if not is_halftime and (minute < 35 or minute > 45):
-        return None
-    if a is None:
-        return None
-
-    dom_son = a["dom_son"]
-    dom_cor = a["dom_cor"]
-    dom_pos = a["dom_pos"]
-    dom_xg  = a["dom_xg"]
-
-    # Criteres minimaux : au moins quelques occasions
-    if dom_son < 2 or dom_cor < 3:
-        return None
-
-    trigger = False
-    raison  = ""
-
-    # Scenario 1 : 0-0 avec vraie pression en fin de 1ere MT
-    if hg == 0 and ag == 0:
-        if dom_son >= 3 and dom_cor >= 4 and dom_pos >= 58:
-            trigger = True
-            raison  = "Match nul avec forte pression - buts attendus en 2MT"
-
-    # Scenario 2 : equipe domicile qui dominait se fait mener 0-1
-    # Elle va pousser fort en 2eme MT pour egaliser
-    if hg == 0 and ag == 1 and a["dom_side"] == "home":
-        if dom_son >= 2 and dom_cor >= 3:
-            trigger = True
-            raison  = "Domicile domine mais mene 0-1 - reaction attendue en 2MT"
-
-    # Scenario 3 : equipe domicile mene 1-0 mais se fait dominer
-    # L'equipe visiteuse va pousser en 2eme MT
-    if hg == 1 and ag == 0 and a["dom_side"] == "away":
-        if dom_son >= 2 and dom_cor >= 3:
-            trigger = True
-            raison  = "Visiteur domine malgre 0-1 - egalisation probable en 2MT"
-
-    if not trigger:
-        return None
-
-    league = str(match.get("league", {}).get("name", "?"))
-    h_name = str(match.get("home_team", "Dom"))
-    a_name = str(match.get("away_team", "Ext"))
-
-    xg_str = ""
-    if a["xg_ok"] and (a["h_xg"] + a["a_xg"]) > 0.1:
-        xg_str = " | xG total: " + str(round(a["h_xg"] + a["a_xg"], 1))
-
-    lines = [
-        "⏱️ ALERTE 2EME MI-TEMPS - " + league,
-        h_name + " " + str(hg) + "-" + str(ag) + " " + a_name + " | " + str(minute) + "min",
-        "📈 " + raison,
-        "📊 " + str(int(dom_son)) + " tirs cadres | " + str(int(dom_cor)) + " corners" + xg_str,
-        "💡 Plus de buts en 2MT | Over 0.5 buts 2MT",
-    ]
-    return "\n".join(lines)
+    return max(35, min(base, 68))
 
 
 def build_alert(match, a, threshold):
@@ -433,58 +336,99 @@ def build_alert(match, a, threshold):
     a_name  = str(match.get("away_team", "Ext"))
     hg, ag  = get_score(match)
     minute  = get_minute(match)
-    mom     = a["momentum"]
+    danger  = a["danger"]
     total_g = hg + ag
 
-    if a["dom_side"] == "home":
-        scorer   = h_name
-        son_disp = str(int(a["h_son"])) + " tirs cadres"
-        cor_disp = str(int(a["h_cor"])) + " corners"
-        pos_disp = str(int(a["h_pos"])) + "% poss."
-    elif a["dom_side"] == "away":
-        scorer   = a_name
-        son_disp = str(int(a["a_son"])) + " tirs cadres"
-        cor_disp = str(int(a["a_cor"])) + " corners"
-        pos_disp = str(int(a["a_pos"])) + "% poss."
-    else:
-        scorer   = "Les deux equipes"
-        son_disp = str(int(a["h_son"])) + "/" + str(int(a["a_son"])) + " tirs cadres"
-        cor_disp = str(int(a["h_cor"])) + "/" + str(int(a["a_cor"])) + " corners"
-        pos_disp = str(int(a["h_pos"])) + "/" + str(int(a["a_pos"])) + "% poss."
-
-    adroit = ""
-    if a["xg_ok"] and a["dom_xg"] >= 1.2:
-        adroit = " (xG " + str(round(a["dom_xg"], 1)) + " 📈)"
-    elif a["dom_ratio"] >= 0.45:
-        adroit = " (adroit 🎯)"
-
-    margin = mom - threshold
-    if margin >= 15 or mom >= 78:
+    # Niveau alerte
+    margin = danger - threshold
+    if margin >= 15 or danger >= 78:
         emj = "🔴🔴"
         lvl = "ALERTE MAX"
-    elif margin >= 7 or mom >= 63:
+    elif margin >= 7 or danger >= 63:
         emj = "🟠"
         lvl = "FORTE PRESSION"
     else:
         emj = "🟡"
         lvl = "PRESSION"
 
+    # Stats match
+    son_str = str(int(a["h_son"])) + "/" + str(int(a["a_son"])) + " tirs cadres"
+    cor_str = str(int(a["h_cor"])) + "/" + str(int(a["a_cor"])) + " corners"
+    xg_str  = ""
+    if a["xg_ok"]:
+        xg_str = " | xG " + str(round(a["h_xg"], 1)) + "/" + str(round(a["a_xg"], 1))
+
+    # Equipe la plus susceptible de marquer (bonus)
+    if a["likely_scorer"] == "home":
+        scorer_str = "Favori: " + h_name
+        if a["likely_xg"] >= 1.2:
+            scorer_str += " (xG " + str(round(a["likely_xg"], 1)) + " 📈)"
+    elif a["likely_scorer"] == "away":
+        scorer_str = "Favori: " + a_name
+        if a["likely_xg"] >= 1.2:
+            scorer_str += " (xG " + str(round(a["likely_xg"], 1)) + " 📈)"
+    else:
+        scorer_str = "Match ouvert - but des deux cotes"
+
+    # Paris
     bets = []
     if a["rec_over25"] or a["p_over25"] >= 65:
         bets.append("Over " + str(total_g) + ".5 (" + str(int(a["p_over25"])) + "%)")
     if a["rec_btts"] or a["p_btts"] >= 62:
         bets.append("BTTS (" + str(int(a["p_btts"])) + "%)")
-    if a["favorite"] in ("H", "A") and a["rec_fav"]:
-        fn = h_name if a["favorite"] == "H" else a_name
-        bets.append(fn[:12] + " win (" + str(int(a["fav_prob"])) + "%)")
     bets.append("Next goal " + ("MT1" if minute < 43 else "MT2"))
 
     lines = [
         emj + " " + lvl + " - " + league,
         h_name + " " + str(hg) + "-" + str(ag) + " " + a_name + " | " + str(minute) + "min",
-        "⚽ Prochain but: " + scorer + adroit,
-        "📊 " + son_disp + " | " + cor_disp + " | " + pos_disp,
+        "⚽ But imminent | " + scorer_str,
+        "📊 " + son_str + " | " + cor_str + xg_str,
         "💡 " + " | ".join(bets),
+    ]
+    return "\n".join(lines)
+
+
+def check_halftime_alert(match, a, minute):
+    """
+    Alerte speciale mi-temps : 0-0 ou 0-1 avec pression
+    -> signal pour parier sur plus de buts en 2eme MT
+    """
+    is_ht = (str(match.get("period", "")).upper() in ("HT", "HALFTIME")
+             or str(match.get("status", "")).lower() in ("halftime", "ht")
+             or (35 <= minute <= 45))
+
+    if not is_ht or a is None:
+        return None
+
+    hg, ag  = get_score(match)
+    h_name  = str(match.get("home_team", "Dom"))
+    a_name  = str(match.get("away_team", "Ext"))
+    league  = str(match.get("league", {}).get("name", "?"))
+
+    # Conditions : match serre avec pression visible
+    if abs(hg - ag) >= 2:
+        return None
+    if a["total_son"] < 3 or a["total_cor"] < 4:
+        return None
+
+    xg_str = ""
+    if a["xg_ok"]:
+        xg_str = " | xG " + str(round(a["h_xg"], 1)) + "/" + str(round(a["a_xg"], 1))
+
+    raison = "Match serre avec pression - buts attendus en 2MT"
+    if hg == 0 and ag == 0:
+        raison = "0-0 avec pression - buts tres probables en 2MT"
+    elif hg == 0 and ag == 1:
+        raison = "Domicile mene 0-1 - reaction attendue en 2MT"
+    elif hg == 1 and ag == 0:
+        raison = "Visiteur domine - egalisation probable en 2MT"
+
+    lines = [
+        "⏱️ ALERTE MI-TEMPS - " + league,
+        h_name + " " + str(hg) + "-" + str(ag) + " " + a_name,
+        "📈 " + raison,
+        "📊 " + str(int(a["total_son"])) + " tirs cadres | " + str(int(a["total_cor"])) + " corners" + xg_str,
+        "💡 Plus de buts 2MT | Over 0.5 buts 2MT",
     ]
     return "\n".join(lines)
 
@@ -520,50 +464,46 @@ async def run_forever():
                         a_name   = str(match.get("away_team", "?"))
                         diff     = abs(hg - ag)
 
-                        # Pas d'alerte apres 85min
                         if minute > 85:
                             continue
 
-                        # Max 3 alertes par match
                         if alerts_count.get(event_id, 0) >= 3:
                             continue
 
-                        pred      = get_prediction(event_id)
-                        a         = analyse(match, pred)
+                        pred = get_prediction(event_id)
+                        a    = analyse(match, pred)
 
                         if a is None:
                             print("  [skip] " + h_name[:10] + " vs " + a_name[:10], flush=True)
                             continue
 
-                        mom       = a["momentum"]
+                        danger    = a["danger"]
                         threshold = get_threshold(a, minute, diff)
 
                         print("  [" + str(minute) + "'] "
                               + h_name[:10] + " " + str(hg) + "-" + str(ag) + " " + a_name[:10]
-                              + " | mom=" + str(mom) + "/" + str(threshold)
-                              + " dom=" + a["dom_side"]
-                              + " son=" + str(int(a["dom_son"]))
-                              + " cor=" + str(int(a["dom_cor"]))
-                              + " pos=" + str(int(a["dom_pos"])),
+                              + " | danger=" + str(danger) + "/" + str(threshold)
+                              + " son=" + str(int(a["total_son"]))
+                              + " cor=" + str(int(a["total_cor"]))
+                              + " xg=" + str(round(a["total_xg"], 1)),
                               flush=True)
 
-                        # Alerte uniquement a une minute donnee, pas de doublon
-                        # Scenario special 2eme mi-temps (35-45min)
-                        sh_key = event_id + "_2mt_" + str(minute // 20)
-                        if sh_key not in alerts_sent:
-                            sh_msg = check_second_half_goals(match, a, minute, hg, ag)
-                            if sh_msg:
-                                alerts_sent[sh_key] = True
+                        # Alerte mi-temps (1 seule par match)
+                        ht_key = event_id + "_ht"
+                        if ht_key not in alerts_sent:
+                            ht_msg = check_halftime_alert(match, a, minute)
+                            if ht_msg:
+                                alerts_sent[ht_key] = True
                                 await bot.send_message(
                                     chat_id=str(TELEGRAM_CHAT_ID),
-                                    text=sh_msg
+                                    text=ht_msg
                                 )
-                                print("  >>> ALERTE 2MT: " + h_name + " vs " + a_name, flush=True)
+                                print("  >>> ALERTE MI-TEMPS: " + h_name + " vs " + a_name, flush=True)
                                 await asyncio.sleep(1)
 
-                        # 1 alerte max par tranche de 20 minutes par match
+                        # Alerte principale : 1 par tranche de 20 minutes
                         alert_key = event_id + "_" + str(minute // 20)
-                        if mom >= threshold and alert_key not in alerts_sent:
+                        if danger >= threshold and alert_key not in alerts_sent:
                             alerts_sent[alert_key] = True
                             alerts_count[event_id] = alerts_count.get(event_id, 0) + 1
                             msg = build_alert(match, a, threshold)
@@ -572,8 +512,8 @@ async def run_forever():
                                 text=msg
                             )
                             print("  >>> ALERTE #" + str(alerts_count[event_id])
-                                  + " : " + h_name + " vs " + a_name
-                                  + " [" + str(minute) + "'] mom=" + str(mom),
+                                  + ": " + h_name + " vs " + a_name
+                                  + " [" + str(minute) + "'] danger=" + str(danger),
                                   flush=True)
                             await asyncio.sleep(1)
 
