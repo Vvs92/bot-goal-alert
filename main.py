@@ -344,6 +344,73 @@ def get_threshold(a, minute, diff):
     return max(35, min(base, 70))
 
 
+def check_second_half_goals(match, a, minute, hg, ag):
+    """
+    Scenario special : alerte 'Plus de buts en 2eme MT'
+    Conditions :
+    - Score 0-0 avec pression forte, OU
+    - Equipe domicile mene 1-0 mais se fait dominer apres 35min
+    - Equipe domicile perd 0-1 entre 35-45min avec occasions
+    Retourne un message ou None
+    """
+    if minute < 35 or minute > 45:
+        return None
+    if a is None:
+        return None
+
+    dom_son = a["dom_son"]
+    dom_cor = a["dom_cor"]
+    dom_pos = a["dom_pos"]
+    dom_xg  = a["dom_xg"]
+
+    # Criteres minimaux : au moins quelques occasions
+    if dom_son < 2 or dom_cor < 3:
+        return None
+
+    trigger = False
+    raison  = ""
+
+    # Scenario 1 : 0-0 avec vraie pression en fin de 1ere MT
+    if hg == 0 and ag == 0:
+        if dom_son >= 3 and dom_cor >= 4 and dom_pos >= 58:
+            trigger = True
+            raison  = "Match nul avec forte pression - buts attendus en 2MT"
+
+    # Scenario 2 : equipe domicile qui dominait se fait mener 0-1
+    # Elle va pousser fort en 2eme MT pour egaliser
+    if hg == 0 and ag == 1 and a["dom_side"] == "home":
+        if dom_son >= 2 and dom_cor >= 3:
+            trigger = True
+            raison  = "Domicile domine mais mene 0-1 - reaction attendue en 2MT"
+
+    # Scenario 3 : equipe domicile mene 1-0 mais se fait dominer
+    # L'equipe visiteuse va pousser en 2eme MT
+    if hg == 1 and ag == 0 and a["dom_side"] == "away":
+        if dom_son >= 2 and dom_cor >= 3:
+            trigger = True
+            raison  = "Visiteur domine malgre 0-1 - egalisation probable en 2MT"
+
+    if not trigger:
+        return None
+
+    league = str(match.get("league", {}).get("name", "?"))
+    h_name = str(match.get("home_team", "Dom"))
+    a_name = str(match.get("away_team", "Ext"))
+
+    xg_str = ""
+    if a["xg_ok"] and (a["h_xg"] + a["a_xg"]) > 0.1:
+        xg_str = " | xG total: " + str(round(a["h_xg"] + a["a_xg"], 1))
+
+    lines = [
+        "⏱️ ALERTE 2EME MI-TEMPS - " + league,
+        h_name + " " + str(hg) + "-" + str(ag) + " " + a_name + " | " + str(minute) + "min",
+        "📈 " + raison,
+        "📊 " + str(int(dom_son)) + " tirs cadres | " + str(int(dom_cor)) + " corners" + xg_str,
+        "💡 Plus de buts en 2MT | Over 0.5 buts 2MT",
+    ]
+    return "\n".join(lines)
+
+
 def build_alert(match, a, threshold):
     league  = str(match.get("league", {}).get("name", "?"))
     h_name  = str(match.get("home_team", "Dom"))
@@ -465,6 +532,19 @@ async def run_forever():
                               flush=True)
 
                         # Alerte uniquement a une minute donnee, pas de doublon
+                        # Scenario special 2eme mi-temps (35-45min)
+                        sh_key = event_id + "_2mt"
+                        if sh_key not in alerts_sent:
+                            sh_msg = check_second_half_goals(match, a, minute, hg, ag)
+                            if sh_msg:
+                                alerts_sent[sh_key] = True
+                                await bot.send_message(
+                                    chat_id=str(TELEGRAM_CHAT_ID),
+                                    text=sh_msg
+                                )
+                                print("  >>> ALERTE 2MT: " + h_name + " vs " + a_name, flush=True)
+                                await asyncio.sleep(1)
+
                         alert_key = event_id + "_" + str(minute)
                         if mom >= threshold and alert_key not in alerts_sent:
                             alerts_sent[alert_key] = True
