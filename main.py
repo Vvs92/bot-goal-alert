@@ -316,18 +316,21 @@ def analyse(match, pred):
 
 
 def get_threshold(a, minute, diff):
-    base = 52
+    # Uniquement actif entre 65 et 88 minutes
+    # Seuil fixe strict - pas de variation par minute
+    base = 48
 
-    if diff == 0 and minute >= 60:    base -= 10
-    elif diff == 0:                   base -= 5
-    elif diff == 1 and minute >= 70:  base -= 8
-    elif diff == 1:                   base -= 4
+    # Ajustement selon scoreline
+    if diff == 0:   base -= 8   # 0-0 = les deux equipes cherchent le but
+    elif diff == 1: base -= 5   # equipe qui perd pousse fort
+    elif diff == 2: base += 5   # moins d interet
 
-    if a["rec_over25"]:               base -= 4
-    if a["p_over25"] >= 75:           base -= 3
+    # Boost ML
+    if a["rec_over25"]:                      base -= 4
+    if a["p_over25"] >= 75:                  base -= 3
     if a["xg_ok"] and a["total_xg"] >= 1.5: base -= 4
 
-    return max(35, min(base, 68))
+    return max(32, min(base, 62))
 
 
 def build_alert(match, a, threshold):
@@ -390,45 +393,41 @@ def build_alert(match, a, threshold):
 
 def check_halftime_alert(match, a, minute):
     """
-    Alerte speciale mi-temps : 0-0 ou 0-1 avec pression
-    -> signal pour parier sur plus de buts en 2eme MT
+    Alerte mi-temps UNIQUEMENT si score 0-0.
     """
+    if a is None:
+        return None
+
+    hg, ag = get_score(match)
+
+    # Uniquement 0-0
+    if hg != 0 or ag != 0:
+        return None
+
     is_ht = (str(match.get("period", "")).upper() in ("HT", "HALFTIME")
              or str(match.get("status", "")).lower() in ("halftime", "ht")
              or (35 <= minute <= 45))
 
-    if not is_ht or a is None:
+    if not is_ht:
         return None
 
-    hg, ag  = get_score(match)
-    h_name  = str(match.get("home_team", "Dom"))
-    a_name  = str(match.get("away_team", "Ext"))
-    league  = str(match.get("league", {}).get("name", "?"))
+    if a["total_son"] < 2 or a["total_cor"] < 3:
+        return None
 
-    # Conditions : match serre avec pression visible
-    if abs(hg - ag) >= 2:
-        return None
-    if a["total_son"] < 3 or a["total_cor"] < 4:
-        return None
+    h_name = str(match.get("home_team", "Dom"))
+    a_name = str(match.get("away_team", "Ext"))
+    league = str(match.get("league", {}).get("name", "?"))
 
     xg_str = ""
-    if a["xg_ok"]:
-        xg_str = " | xG " + str(round(a["h_xg"], 1)) + "/" + str(round(a["a_xg"], 1))
-
-    raison = "Match serre avec pression - buts attendus en 2MT"
-    if hg == 0 and ag == 0:
-        raison = "0-0 avec pression - buts tres probables en 2MT"
-    elif hg == 0 and ag == 1:
-        raison = "Domicile mene 0-1 - reaction attendue en 2MT"
-    elif hg == 1 and ag == 0:
-        raison = "Visiteur domine - egalisation probable en 2MT"
+    if a["xg_ok"] and (a["h_xg"] + a["a_xg"]) > 0.3:
+        xg_str = " | xG " + str(round(a["h_xg"] + a["a_xg"], 1))
 
     lines = [
-        "⏱️ ALERTE MI-TEMPS - " + league,
-        h_name + " " + str(hg) + "-" + str(ag) + " " + a_name,
-        "📈 " + raison,
+        "⏱️ MI-TEMPS 0-0 - " + league,
+        h_name + " 0-0 " + a_name + " | 45min",
+        "📈 Score vierge - buts probables en 2MT",
         "📊 " + str(int(a["total_son"])) + " tirs cadres | " + str(int(a["total_cor"])) + " corners" + xg_str,
-        "💡 Plus de buts 2MT | Over 0.5 buts 2MT",
+        "💡 Over 0.5 buts 2MT | Les deux equipes a 0",
     ]
     return "\n".join(lines)
 
@@ -464,11 +463,9 @@ async def run_forever():
                         a_name   = str(match.get("away_team", "?"))
                         diff     = abs(hg - ag)
 
-                        if minute > 85:
-                            continue
-
-                        if alerts_count.get(event_id, 0) >= 3:
-                            continue
+                        # Hors fenetre et pas mi-temps = skip pour alerte principale
+                        # (mi-temps reste actif independamment)
+                        pass
 
                         pred = get_prediction(event_id)
                         a    = analyse(match, pred)
@@ -501,18 +498,18 @@ async def run_forever():
                                 print("  >>> ALERTE MI-TEMPS: " + h_name + " vs " + a_name, flush=True)
                                 await asyncio.sleep(1)
 
-                        # Alerte principale : 1 par tranche de 20 minutes
-                        alert_key = event_id + "_" + str(minute // 20)
-                        if danger >= threshold and alert_key not in alerts_sent:
+                        # Alerte principale : uniquement 65-88min, 1 seule par match
+                        alert_key = event_id + "_main"
+                        if (65 <= minute <= 88
+                                and danger >= threshold
+                                and alert_key not in alerts_sent):
                             alerts_sent[alert_key] = True
-                            alerts_count[event_id] = alerts_count.get(event_id, 0) + 1
                             msg = build_alert(match, a, threshold)
                             await bot.send_message(
                                 chat_id=str(TELEGRAM_CHAT_ID),
                                 text=msg
                             )
-                            print("  >>> ALERTE #" + str(alerts_count[event_id])
-                                  + ": " + h_name + " vs " + a_name
+                            print("  >>> ALERTE FINALE: " + h_name + " vs " + a_name
                                   + " [" + str(minute) + "'] danger=" + str(danger),
                                   flush=True)
                             await asyncio.sleep(1)
