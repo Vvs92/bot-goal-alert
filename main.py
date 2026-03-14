@@ -217,7 +217,7 @@ def analyse(match, pred):
 
     def team_score(son, tot, cor, pos, xg):
         # Criteres minimaux OBLIGATOIRES - si un manque = 0
-        if son < 3:  return 0.0
+        if son < 2:  return 0.0
         if cor < 4:  return 0.0
         if pos < 60: return 0.0
 
