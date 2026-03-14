@@ -353,7 +353,9 @@ def check_second_half_goals(match, a, minute, hg, ag):
     - Equipe domicile perd 0-1 entre 35-45min avec occasions
     Retourne un message ou None
     """
-    if minute < 35 or minute > 45:
+    # Accepter aussi la mi-temps exacte (statut halftime, minute=45)
+    is_halftime = str(match.get("period", "")).upper() in ("HT", "HALFTIME") or str(match.get("status", "")).lower() in ("halftime", "ht")
+    if not is_halftime and (minute < 35 or minute > 45):
         return None
     if a is None:
         return None
@@ -545,7 +547,8 @@ async def run_forever():
                                 print("  >>> ALERTE 2MT: " + h_name + " vs " + a_name, flush=True)
                                 await asyncio.sleep(1)
 
-                        alert_key = event_id + "_" + str(minute)
+                        # Fenetre de 10 minutes : 1 alerte max par tranche de 10min
+                        alert_key = event_id + "_" + str(minute // 10)
                         if mom >= threshold and alert_key not in alerts_sent:
                             alerts_sent[alert_key] = True
                             alerts_count[event_id] = alerts_count.get(event_id, 0) + 1
