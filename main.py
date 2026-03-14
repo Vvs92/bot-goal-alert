@@ -216,18 +216,14 @@ def analyse(match, pred):
     fav_prob   = sf(pred.get("favorite_prob"))
 
     def team_score(son, tot, cor, pos, xg):
-        # Criteres minimaux OBLIGATOIRES - si un manque = 0
-        if son < 2:  return 0.0
-        if cor < 4:  return 0.0
-        if pos < 60: return 0.0
-
         score = 0.0
 
-        # SIGNAL 1 : Tirs cadres (qualite occasions)
+        # SIGNAL 1 : Tirs cadres
         if son >= 8:    score += 40
         elif son >= 6:  score += 32
         elif son >= 4:  score += 22
         elif son >= 3:  score += 14
+        elif son >= 2:  score += 7
 
         # SIGNAL 2 : Adresse via xG (si dispo) sinon ratio
         if xg_ok and xg > 0:
@@ -242,13 +238,14 @@ def analyse(match, pred):
             elif ratio >= 0.40: score += 12
             elif ratio >= 0.25: score += 5
 
-        # SIGNAL 3 : Corners (pression dans la surface)
+        # SIGNAL 3 : Corners
         if cor >= 9:    score += 22
         elif cor >= 7:  score += 17
         elif cor >= 5:  score += 12
         elif cor >= 4:  score += 8
+        elif cor >= 2:  score += 3
 
-        # SIGNAL 4 : Possession (temps dans camp adverse)
+        # SIGNAL 4 : Possession
         if pos >= 72:   score += 16
         elif pos >= 66: score += 12
         elif pos >= 60: score += 7
@@ -258,10 +255,24 @@ def analyse(match, pred):
     h_score = team_score(h_son, h_tot, h_cor, h_pos, h_xg)
     a_score = team_score(a_son, a_tot, a_cor, a_pos, a_xg)
 
-    if h_score == 0 and a_score == 0:
-        return None
+    # Score combine du match (les deux equipes)
+    match_score = h_score + a_score
+
+    # Criteres minimaux sur le MATCH ENTIER (pas par equipe)
+    # Au moins 3 tirs cadres au total ET 5 corners au total ET xG > 0.5
+    total_son = h_son + a_son
+    total_cor = h_cor + a_cor
+    total_xg  = h_xg + a_xg
+
+    if total_son < 3:  return None
+    if total_cor < 5:  return None
+    if xg_ok and total_xg < 0.5: return None
+    if h_score == 0 and a_score == 0: return None
 
     # Equipe dominante
+    # Le score du match sert de base au momentum
+    _ = match_score  # utilise pour le momentum global
+
     if h_score > a_score * 1.3:
         dom_side  = "home"
         dom_score = h_score
@@ -287,8 +298,11 @@ def analyse(match, pred):
         dom_xg    = max(h_xg, a_xg)
         dom_ratio = 0
 
-    # Momentum final
-    momentum = min(dom_score, 80)
+    # Momentum final : base sur pression dominante + bonus match actif
+    momentum = min(dom_score, 70)
+    # Bonus si les deux equipes poussent (match ouvert)
+    if h_score > 5 and a_score > 5:
+        momentum += min(int((h_score + a_score) / 10), 10)
 
     # Bonus score serre
     if diff == 0:   momentum += 8
