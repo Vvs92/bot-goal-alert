@@ -535,7 +535,7 @@ async def run_forever():
 
                         # Alerte uniquement a une minute donnee, pas de doublon
                         # Scenario special 2eme mi-temps (35-45min)
-                        sh_key = event_id + "_2mt"
+                        sh_key = event_id + "_2mt_" + str(minute // 20)
                         if sh_key not in alerts_sent:
                             sh_msg = check_second_half_goals(match, a, minute, hg, ag)
                             if sh_msg:
@@ -547,8 +547,8 @@ async def run_forever():
                                 print("  >>> ALERTE 2MT: " + h_name + " vs " + a_name, flush=True)
                                 await asyncio.sleep(1)
 
-                        # Fenetre de 10 minutes : 1 alerte max par tranche de 10min
-                        alert_key = event_id + "_" + str(minute // 10)
+                        # 1 alerte max par tranche de 20 minutes par match
+                        alert_key = event_id + "_" + str(minute // 20)
                         if mom >= threshold and alert_key not in alerts_sent:
                             alerts_sent[alert_key] = True
                             alerts_count[event_id] = alerts_count.get(event_id, 0) + 1
