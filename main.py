@@ -486,8 +486,8 @@ def analyse(match, pred, event_id):
 def get_threshold(a, diff, minute):
     base = 62
 
-    # Fenetre privilegiee 60-88min
-    if minute >= 60:     base -= 14
+    # Fenetre privilegiee 55-88min
+    if minute >= 55:     base -= 14
     elif minute >= 50:   base -= 5
 
     # Score serre
