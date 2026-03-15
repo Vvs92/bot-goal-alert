@@ -206,7 +206,7 @@ def analyse(match, pred, event_id):
     diff   = abs(hg - ag)
     minute = get_minute(match)
 
-    if diff >= 3:
+    if diff >= 2:
         return None
 
     h_son = get_stat(match, "home", "shots_on_target")
@@ -235,9 +235,9 @@ def analyse(match, pred, event_id):
     dom_pos   = max(h_pos, a_pos)
 
     # Match ferme = rien a signaler
-    if total_son < 3:   return None
-    if total_cor < 4:   return None
-    if xg_ok and total_xg < 0.4: return None
+    if total_son < 5:              return None   # min 5 tirs cadres totaux
+    if total_cor < 6:              return None   # min 6 corners totaux
+    if xg_ok and total_xg < 1.0:  return None   # xG total min 1.0
 
     # === SCORE DE DANGER SNAPSHOT ===
     danger = 0.0
