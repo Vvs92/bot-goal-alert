@@ -333,15 +333,14 @@ def analyse(match, pred, event_id):
     total_xg  = h_xg + a_xg
     dom_pos   = max(h_pos, a_pos)
 
-    # Criteres minimaux sur stats MATCH COMPLET (pas par periode)
-    # Pour ne pas bloquer un match qui s est reveille en 2eme MT
+    # Criteres minimaux sur stats MATCH COMPLET
     total_son_full = get_stat(match, "home", "shots_on_target") + get_stat(match, "away", "shots_on_target")
     total_cor_full = get_stat(match, "home", "corner_kicks") + get_stat(match, "away", "corner_kicks")
-    total_xg_full  = h_xg + a_xg  # xG est toujours le total match
+    total_xg_full  = h_xg + a_xg
 
-    if total_son_full < 3:                 return None
-    if total_cor_full < 6:                 return None
-    if xg_ok and total_xg_full < 1.0:     return None
+    if total_son_full < 5:                 return None   # min 5 tirs cadres match entier
+    if total_cor_full < 7:                 return None   # min 7 corners match entier
+    if xg_ok and total_xg_full < 1.2:     return None   # xG total min 1.2
 
     # Incidents : dernier but + cartons rouges
     inc_data = parse_incidents(match, minute)
@@ -484,33 +483,35 @@ def analyse(match, pred, event_id):
 
 
 def get_threshold(a, diff, minute):
-    base = 62
+    base = 68   # seuil de base plus strict
 
     # Fenetre privilegiee 55-88min
     if minute >= 55:     base -= 14
-    elif minute >= 50:   base -= 5
+    elif minute >= 50:   base -= 6
 
     # Score serre
-    if diff == 0:        base -= 8
-    elif diff == 1:      base -= 5
-    elif diff == 2:      base += 8
+    if diff == 0:        base -= 6
+    elif diff == 1:      base -= 4
+    elif diff == 2:      base += 10  # ecart 2 buts = quasi impossible
 
-    # ML
-    if a["rec_over25"]:                       base -= 4
-    if a["p_over25"] >= 75:                   base -= 3
-    if a["xg_ok"] and a["total_xg"] >= 1.5:  base -= 4
+    # ML fiable uniquement si recommend explicite
+    if a["rec_over25"]:                       base -= 5
+    if a["xg_ok"] and a["total_xg"] >= 2.0:  base -= 5  # xG eleve = signal fort
+    elif a["xg_ok"] and a["total_xg"] >= 1.5: base -= 2
 
-    # Pression montante
-    if a["pressure_rising"]:                  base -= 6
+    # Pression montante confirmee = signal fort
+    if a["pressure_rising"]:                  base -= 7
 
-    # Carton rouge = plus de danger
+    # Carton rouge
     if a["h_red"] > 0 or a["a_red"] > 0:     base -= 5
 
-    # Longtemps sans but
-    if a["mins_since_goal"] is not None and a["mins_since_goal"] >= 25:
-        base -= 4
+    # Longtemps sans but avec pression
+    if a["mins_since_goal"] is not None and a["mins_since_goal"] >= 30:
+        base -= 5
+    elif a["mins_since_goal"] is not None and a["mins_since_goal"] >= 20:
+        base -= 2
 
-    return max(32, min(base, 72))
+    return max(35, min(base, 75))
 
 
 def build_alert(match, a, threshold):
@@ -689,7 +690,7 @@ async def run_forever():
                             continue
 
                         margin = danger - threshold
-                        is_max = (margin >= 15 or danger >= 78)
+                        is_max = (margin >= 18 or danger >= 82)
 
                         if danger >= threshold and is_max:
                             match_alerts[event_id] = {"count": count + 1, "last_minute": minute}
