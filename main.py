@@ -209,14 +209,55 @@ def analyse(match, pred, event_id):
     if diff >= 2:
         return None
 
-    h_son = get_stat(match, "home", "shots_on_target")
-    a_son = get_stat(match, "away", "shots_on_target")
-    h_tot = get_stat(match, "home", "total_shots")
-    a_tot = get_stat(match, "away", "total_shots")
-    h_cor = get_stat(match, "home", "corner_kicks")
-    a_cor = get_stat(match, "away", "corner_kicks")
-    h_pos = get_stat(match, "home", "ball_possession")
-    a_pos = get_stat(match, "away", "ball_possession")
+    # Utiliser les stats de la mi-temps en cours uniquement
+    # En 2eme MT : si Bzzoiro fournit live_stats_2h on l utilise
+    # Sinon fallback sur live_stats global
+    period = str(match.get("period", "")).upper()
+    in_second_half = period in ("2T", "2H") or (minute is not None and int(minute if minute else 0) > 45)
+
+    def get_period_stat(match, side, key):
+        # Cherche d abord les stats de la 2eme MT specifiquement
+        if in_second_half:
+            for field in ("live_stats_2h", "stats_2h", "second_half_stats"):
+                ls2 = match.get(field)
+                if isinstance(ls2, dict):
+                    sd2 = ls2.get(side)
+                    if isinstance(sd2, dict) and sd2.get(key) is not None:
+                        return sf(sd2.get(key))
+        # Fallback : stats globales
+        return get_stat(match, side, key)
+
+    if in_second_half:
+        # En 2eme MT : soustraire les stats de la 1ere MT si disponibles
+        def get_2h_stat(match, side, key):
+            total = get_stat(match, side, key)
+            # Cherche stats 1ere MT
+            for field in ("live_stats_1h", "stats_1h", "first_half_stats"):
+                ls1 = match.get(field)
+                if isinstance(ls1, dict):
+                    sd1 = ls1.get(side)
+                    if isinstance(sd1, dict) and sd1.get(key) is not None:
+                        first_half_val = sf(sd1.get(key))
+                        return max(0.0, total - first_half_val)
+            return total  # pas de stats 1MT dispo = on garde le total
+
+        h_son = get_2h_stat(match, "home", "shots_on_target")
+        a_son = get_2h_stat(match, "away", "shots_on_target")
+        h_tot = get_2h_stat(match, "home", "total_shots")
+        a_tot = get_2h_stat(match, "away", "total_shots")
+        h_cor = get_2h_stat(match, "home", "corner_kicks")
+        a_cor = get_2h_stat(match, "away", "corner_kicks")
+        h_pos = get_stat(match, "home", "ball_possession")  # possession = toujours temps reel
+        a_pos = get_stat(match, "away", "ball_possession")
+    else:
+        h_son = get_stat(match, "home", "shots_on_target")
+        a_son = get_stat(match, "away", "shots_on_target")
+        h_tot = get_stat(match, "home", "total_shots")
+        a_tot = get_stat(match, "away", "total_shots")
+        h_cor = get_stat(match, "home", "corner_kicks")
+        a_cor = get_stat(match, "away", "corner_kicks")
+        h_pos = get_stat(match, "home", "ball_possession")
+        a_pos = get_stat(match, "away", "ball_possession")
     h_xg  = sf(pred.get("expected_home_goals"))
     a_xg  = sf(pred.get("expected_away_goals"))
     xg_ok = (h_xg + a_xg) > 0.1
