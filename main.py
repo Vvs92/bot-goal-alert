@@ -333,10 +333,15 @@ def analyse(match, pred, event_id):
     total_xg  = h_xg + a_xg
     dom_pos   = max(h_pos, a_pos)
 
-    # Criteres minimaux stricts
-    if total_son < 5:                      return None
-    if total_cor < 6:                      return None
-    if xg_ok and total_xg < 1.0:          return None
+    # Criteres minimaux sur stats MATCH COMPLET (pas par periode)
+    # Pour ne pas bloquer un match qui s est reveille en 2eme MT
+    total_son_full = get_stat(match, "home", "shots_on_target") + get_stat(match, "away", "shots_on_target")
+    total_cor_full = get_stat(match, "home", "corner_kicks") + get_stat(match, "away", "corner_kicks")
+    total_xg_full  = h_xg + a_xg  # xG est toujours le total match
+
+    if total_son_full < 3:                 return None
+    if total_cor_full < 6:                 return None
+    if xg_ok and total_xg_full < 1.0:     return None
 
     # Incidents : dernier but + cartons rouges
     inc_data = parse_incidents(match, minute)
