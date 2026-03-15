@@ -15,29 +15,46 @@ HEADERS  = {"Authorization": "Token " + BZZOIRO_KEY}
 
 INTERVAL = 60
 
+# Ligues de haute qualite uniquement - donnees fiables
 WATCHED_LEAGUES = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    11, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24
+    1:  "Premier League",
+    3:  "La Liga",
+    4:  "Serie A",
+    5:  "Bundesliga",
+    6:  "Ligue 1",
+    7:  "Champions League",
+    8:  "Europa League",
+    9:  "Brasileirao Serie A",
+    10: "Eredivisie",
+    11: "Trendyol Super Lig",
+    12: "Championship",
+    14: "Belgian Pro League",
+    17: "Saudi Pro League",
+    18: "MLS",
+    19: "Liga MX",
+    20: "Liga MX Clausura",
 }
 
 LIVE_STATUSES = {
-    "inprogress", "1st_half", "2nd_half", "halftime",
-    "ht", "live", "playing", "in_play", "1h", "2h"
+    "inprogress", "1st_half", "2nd_half",
+    "live", "playing", "in_play", "1h", "2h"
 }
 
-# Cle = event_id
-# Valeur = {"count": int, "last_alert_minute": int}
+HALFTIME_STATUSES = {"halftime", "ht"}
+
+# Cache alertes : cle = event_id
+# valeur = {"count": int, "last_minute": int}
 match_alerts = {}
 
-# Cle mi-temps = event_id + "_ht"
+# Cache alerte mi-temps
 ht_alerts_sent = {}
 
 # Cache predictions
 pred_cache = {}
 
-# Cache stats precedentes pour detecter montee de pression
-# Cle = event_id, valeur = {"son": float, "cor": float, "xg": float, "minute": int}
-prev_stats = {}
+# Historique stats sur 3 cycles pour momentum progressif
+# cle = event_id, valeur = liste de dicts [{son, cor, xg, minute}, ...]
+stats_history = {}
 
 
 def api_get(endpoint, params=None):
@@ -118,8 +135,6 @@ def get_minute(match):
         except Exception:
             pass
     per = str(match.get("period", "")).upper()
-    if per in ("HT", "HALFTIME"):
-        return 45
     if per in ("FT", "FINISHED"):
         return 90
     return 0
@@ -135,6 +150,11 @@ def get_stat(match, side, key):
     return sf(sd.get(key))
 
 
+def get_incidents(match):
+    inc = match.get("incidents")
+    return inc if isinstance(inc, list) else []
+
+
 def get_live_matches():
     today = datetime.now().strftime("%Y-%m-%d")
     candidates = []
@@ -146,7 +166,7 @@ def get_live_matches():
         candidates.extend(rows)
 
     if not candidates:
-        for sv in ["inprogress", "1st_half", "2nd_half", "halftime"]:
+        for sv in ["inprogress", "1st_half", "2nd_half"]:
             rows = api_pages("/api/events/", {"status": sv, "date": today})
             if rows:
                 print("[LIVE] status=" + sv + " -> " + str(len(rows)), flush=True)
@@ -170,6 +190,11 @@ def get_live_matches():
         st  = str(m.get("status", "")).lower().strip()
         mn  = m.get("current_minute")
         per = str(m.get("period", "")).upper()
+
+        # Ignorer mi-temps
+        if st in HALFTIME_STATUSES or per in ("HT", "HALFTIME"):
+            continue
+
         is_live = (
             st in LIVE_STATUSES
             or (mn is not None and str(mn).isdigit() and int(mn) > 0)
@@ -197,58 +222,90 @@ def get_prediction(event_id):
     return pred
 
 
-def analyse(match, pred, event_id):
+def parse_incidents(match, minute):
     """
-    Calcule le danger global du match qu un but tombe.
-    Combine snapshot actuel + detection de montee de pression.
+    Analyse les incidents pour :
+    - Temps depuis le dernier but
+    - Presence de carton rouge
     """
-    hg, ag = get_score(match)
-    diff   = abs(hg - ag)
-    minute = get_minute(match)
+    incidents   = get_incidents(match)
+    last_goal_m = None
+    h_red       = 0
+    a_red       = 0
 
+    for inc in incidents:
+        try:
+            itype   = str(inc.get("type", "")).lower()
+            inc_min = int(inc.get("minute") or 0)
+            is_home = inc.get("is_home")
+
+            if itype == "goal":
+                if last_goal_m is None or inc_min > last_goal_m:
+                    last_goal_m = inc_min
+
+            if itype == "card":
+                card_type = str(inc.get("card_type") or inc.get("detail") or "").lower()
+                if "red" in card_type:
+                    if is_home:
+                        h_red += 1
+                    else:
+                        a_red += 1
+        except Exception:
+            continue
+
+    mins_since_goal = (minute - last_goal_m) if last_goal_m is not None else None
+
+    return {
+        "mins_since_goal": mins_since_goal,
+        "last_goal_min":   last_goal_m,
+        "h_red":           h_red,
+        "a_red":           a_red,
+        "has_red":         (h_red + a_red) > 0,
+    }
+
+
+def get_2h_stats(match, side, key):
+    """
+    Stats 2eme MT = moitie des stats 1MT (memoire du match)
+                  + stats reelles depuis la reprise.
+    Formule : (stats_1MT / 2) + (total - stats_1MT)
+    = total - (stats_1MT / 2)
+    Ca preserve la lancee du match tout en valorisant la 2MT.
+    """
+    total = get_stat(match, side, key)
+    for field in ("live_stats_1h", "stats_1h", "first_half_stats"):
+        ls1 = match.get(field)
+        if isinstance(ls1, dict):
+            sd1 = ls1.get(side)
+            if isinstance(sd1, dict) and sd1.get(key) is not None:
+                first_half = sf(sd1.get(key))
+                # Moitie 1MT + ce qui s est passe en 2MT
+                second_half_only = max(0.0, total - first_half)
+                return (first_half / 2.0) + second_half_only
+    # Pas de stats 1MT dispo : on retourne le total
+    return total
+
+
+def analyse(match, pred, event_id):
+    hg, ag  = get_score(match)
+    diff    = abs(hg - ag)
+    minute  = get_minute(match)
+    period  = str(match.get("period", "")).upper()
+
+    # Match plie = ignore
     if diff >= 2:
         return None
 
-    # Utiliser les stats de la mi-temps en cours uniquement
-    # En 2eme MT : si Bzzoiro fournit live_stats_2h on l utilise
-    # Sinon fallback sur live_stats global
-    period = str(match.get("period", "")).upper()
-    in_second_half = period in ("2T", "2H") or (minute is not None and int(minute if minute else 0) > 45)
+    in_2h = period in ("2T", "2H") or minute > 45
 
-    def get_period_stat(match, side, key):
-        # Cherche d abord les stats de la 2eme MT specifiquement
-        if in_second_half:
-            for field in ("live_stats_2h", "stats_2h", "second_half_stats"):
-                ls2 = match.get(field)
-                if isinstance(ls2, dict):
-                    sd2 = ls2.get(side)
-                    if isinstance(sd2, dict) and sd2.get(key) is not None:
-                        return sf(sd2.get(key))
-        # Fallback : stats globales
-        return get_stat(match, side, key)
-
-    if in_second_half:
-        # En 2eme MT : soustraire les stats de la 1ere MT si disponibles
-        def get_2h_stat(match, side, key):
-            total = get_stat(match, side, key)
-            # Cherche stats 1ere MT
-            for field in ("live_stats_1h", "stats_1h", "first_half_stats"):
-                ls1 = match.get(field)
-                if isinstance(ls1, dict):
-                    sd1 = ls1.get(side)
-                    if isinstance(sd1, dict) and sd1.get(key) is not None:
-                        first_half_val = sf(sd1.get(key))
-                        return max(0.0, total - first_half_val)
-            return total  # pas de stats 1MT dispo = on garde le total
-
-        h_son = get_2h_stat(match, "home", "shots_on_target")
-        a_son = get_2h_stat(match, "away", "shots_on_target")
-        h_tot = get_2h_stat(match, "home", "total_shots")
-        a_tot = get_2h_stat(match, "away", "total_shots")
-        h_cor = get_2h_stat(match, "home", "corner_kicks")
-        a_cor = get_2h_stat(match, "away", "corner_kicks")
-        h_pos = get_stat(match, "home", "ball_possession")  # possession = toujours temps reel
-        a_pos = get_stat(match, "away", "ball_possession")
+    # Stats selon la periode en cours
+    if in_2h:
+        h_son = get_2h_stats(match, "home", "shots_on_target")
+        a_son = get_2h_stats(match, "away", "shots_on_target")
+        h_tot = get_2h_stats(match, "home", "total_shots")
+        a_tot = get_2h_stats(match, "away", "total_shots")
+        h_cor = get_2h_stats(match, "home", "corner_kicks")
+        a_cor = get_2h_stats(match, "away", "corner_kicks")
     else:
         h_son = get_stat(match, "home", "shots_on_target")
         a_son = get_stat(match, "away", "shots_on_target")
@@ -256,8 +313,9 @@ def analyse(match, pred, event_id):
         a_tot = get_stat(match, "away", "total_shots")
         h_cor = get_stat(match, "home", "corner_kicks")
         a_cor = get_stat(match, "away", "corner_kicks")
-        h_pos = get_stat(match, "home", "ball_possession")
-        a_pos = get_stat(match, "away", "ball_possession")
+
+    h_pos = get_stat(match, "home", "ball_possession")
+    a_pos = get_stat(match, "away", "ball_possession")
     h_xg  = sf(pred.get("expected_home_goals"))
     a_xg  = sf(pred.get("expected_away_goals"))
     xg_ok = (h_xg + a_xg) > 0.1
@@ -266,102 +324,122 @@ def analyse(match, pred, event_id):
     p_btts     = sf(pred.get("prob_btts_yes"))
     rec_over25 = bool(pred.get("over_25_recommend"))
     rec_btts   = bool(pred.get("btts_recommend"))
+    rec_fav    = bool(pred.get("favorite_recommend"))
     favorite   = str(pred.get("favorite") or "")
     fav_prob   = sf(pred.get("favorite_prob"))
-    rec_fav    = bool(pred.get("favorite_recommend"))
 
     total_son = h_son + a_son
     total_cor = h_cor + a_cor
     total_xg  = h_xg + a_xg
     dom_pos   = max(h_pos, a_pos)
 
-    # Match ferme = rien a signaler
-    if total_son < 5:              return None   # min 5 tirs cadres totaux
-    if total_cor < 6:              return None   # min 6 corners totaux
-    if xg_ok and total_xg < 1.0:  return None   # xG total min 1.0
+    # Criteres minimaux stricts
+    if total_son < 5:                      return None
+    if total_cor < 6:                      return None
+    if xg_ok and total_xg < 1.0:          return None
 
-    # === SCORE DE DANGER SNAPSHOT ===
+    # Incidents : dernier but + cartons rouges
+    inc_data = parse_incidents(match, minute)
+
+    # === SCORE DE DANGER DU MATCH ===
     danger = 0.0
 
     # Signal 1 : tirs cadres totaux
-    if total_son >= 10:  danger += 35
-    elif total_son >= 7: danger += 28
-    elif total_son >= 5: danger += 20
-    elif total_son >= 3: danger += 12
+    if total_son >= 10:   danger += 35
+    elif total_son >= 7:  danger += 28
+    elif total_son >= 5:  danger += 20
 
     # Signal 2 : xG total
     if xg_ok:
-        if total_xg >= 3.0:   danger += 30
-        elif total_xg >= 2.0: danger += 24
-        elif total_xg >= 1.5: danger += 18
-        elif total_xg >= 1.0: danger += 12
-        elif total_xg >= 0.5: danger += 6
+        if total_xg >= 3.0:    danger += 30
+        elif total_xg >= 2.0:  danger += 24
+        elif total_xg >= 1.5:  danger += 18
+        elif total_xg >= 1.0:  danger += 12
 
     # Signal 3 : corners totaux
-    if total_cor >= 12:  danger += 20
-    elif total_cor >= 9: danger += 16
-    elif total_cor >= 7: danger += 12
-    elif total_cor >= 5: danger += 8
-    elif total_cor >= 4: danger += 4
+    if total_cor >= 12:   danger += 20
+    elif total_cor >= 9:  danger += 16
+    elif total_cor >= 7:  danger += 12
+    elif total_cor >= 6:  danger += 8
 
     # Signal 4 : possession dominante
-    if dom_pos >= 70:   danger += 12
-    elif dom_pos >= 65: danger += 8
-    elif dom_pos >= 60: danger += 5
+    if dom_pos >= 70:     danger += 12
+    elif dom_pos >= 65:   danger += 8
+    elif dom_pos >= 60:   danger += 5
 
     # Signal 5 : les deux equipes attaquent
-    if h_son >= 2 and a_son >= 2:
-        danger += 8
-    if xg_ok and h_xg >= 0.3 and a_xg >= 0.3:
-        danger += 6
+    if h_son >= 3 and a_son >= 2:   danger += 8
+    if xg_ok and h_xg >= 0.4 and a_xg >= 0.4:  danger += 6
+
+    # Signal 6 : temps depuis dernier but
+    # Plus ca fait longtemps sans but avec pression = plus c'est imminent
+    msg = inc_data["mins_since_goal"]
+    if msg is not None:
+        if msg >= 30:   danger += 12
+        elif msg >= 20: danger += 8
+        elif msg >= 12: danger += 4
+
+    # Signal 7 : carton rouge
+    # Equipe reduite = l autre equipe va marquer
+    if inc_data["has_red"]:
+        danger += 10
 
     # Bonus ML
-    if p_over25 >= 72:  danger += 6
-    if rec_over25:      danger += 4
-    if rec_btts:        danger += 3
+    if p_over25 >= 72:   danger += 6
+    if rec_over25:        danger += 4
+    if rec_btts:          danger += 3
 
     # Bonus score serre
-    if diff == 0:   danger += 8
-    elif diff == 1: danger += 4
+    if diff == 0:         danger += 8
+    elif diff == 1:       danger += 4
 
-    # === DETECTION MONTEE DE PRESSION ===
-    # Compare avec le cycle precedent pour voir si ca monte
-    pressure_rising = False
-    pressure_bonus  = 0
-    prev = prev_stats.get(event_id)
+    # === MOMENTUM PROGRESSIF SUR 3 CYCLES ===
+    pressure_rising  = False
+    pressure_bonus   = 0
+    history = stats_history.get(event_id, [])
 
-    if prev and prev["minute"] < minute:
-        delta_son = total_son - prev["son"]
-        delta_cor = total_cor - prev["cor"]
-        delta_xg  = total_xg  - prev["xg"]
+    if len(history) >= 2:
+        prev1 = history[-1]  # cycle precedent
+        prev2 = history[-2]  # 2 cycles avant
 
-        # Pression qui monte = tirs cadres ET corners augmentent
-        if delta_son >= 2 and delta_cor >= 1:
+        delta1_son = total_son - prev1["son"]
+        delta1_cor = total_cor - prev1["cor"]
+        delta1_xg  = total_xg  - prev1["xg"]
+        delta2_son = total_son - prev2["son"]
+        delta2_cor = total_cor - prev2["cor"]
+
+        # Pression qui monte sur 2 cycles consecutifs
+        if delta2_son >= 3 and delta1_son >= 1:
             pressure_rising = True
-            pressure_bonus  = 12
-        elif delta_son >= 1 and delta_cor >= 2:
+            pressure_bonus  = 15
+        elif delta2_son >= 2 and delta1_cor >= 2:
+            pressure_rising = True
+            pressure_bonus  = 10
+        elif delta1_son >= 2 and delta1_xg >= 0.4:
             pressure_rising = True
             pressure_bonus  = 8
-        elif delta_son >= 1 and delta_xg >= 0.3:
-            pressure_rising = True
-            pressure_bonus  = 6
 
         danger += pressure_bonus
 
-    # Mettre a jour le cache stats
-    prev_stats[event_id] = {
-        "son":    total_son,
-        "cor":    total_cor,
-        "xg":     total_xg,
-        "minute": minute,
-    }
+    # Mettre a jour historique (max 3 entrees)
+    history.append({"son": total_son, "cor": total_cor, "xg": total_xg, "minute": minute})
+    if len(history) > 3:
+        history = history[-3:]
+    stats_history[event_id] = history
 
     danger = min(max(int(danger), 0), 100)
 
-    # Equipe la plus dangereuse (bonus info)
+    # Equipe la plus dangereuse (info bonus)
     h_danger = h_son * 8 + h_xg * 15 + h_cor * 3
     a_danger = a_son * 8 + a_xg * 15 + a_cor * 3
-    if h_danger > a_danger * 1.4:
+
+    if inc_data["a_red"] > 0:
+        likely_scorer = "home"
+        likely_xg     = h_xg
+    elif inc_data["h_red"] > 0:
+        likely_scorer = "away"
+        likely_xg     = a_xg
+    elif h_danger > a_danger * 1.4:
         likely_scorer = "home"
         likely_xg     = h_xg
     elif a_danger > h_danger * 1.4:
@@ -380,46 +458,54 @@ def analyse(match, pred, event_id):
         "total_son":       total_son,
         "total_cor":       total_cor,
         "total_xg":        total_xg,
-        "h_son": h_son, "a_son": a_son,
-        "h_cor": h_cor, "a_cor": a_cor,
-        "h_pos": h_pos, "a_pos": a_pos,
-        "h_xg":  h_xg,  "a_xg":  a_xg,
-        "p_over25":   p_over25,
-        "p_btts":     p_btts,
-        "rec_over25": rec_over25,
-        "rec_btts":   rec_btts,
-        "rec_fav":    rec_fav,
-        "favorite":   favorite,
-        "fav_prob":   fav_prob,
-        "xg_ok":      xg_ok,
-        "diff":        diff,
+        "h_son": h_son,    "a_son": a_son,
+        "h_cor": h_cor,    "a_cor": a_cor,
+        "h_pos": h_pos,    "a_pos": a_pos,
+        "h_xg":  h_xg,     "a_xg":  a_xg,
+        "p_over25":        p_over25,
+        "p_btts":          p_btts,
+        "rec_over25":      rec_over25,
+        "rec_btts":        rec_btts,
+        "rec_fav":         rec_fav,
+        "favorite":        favorite,
+        "fav_prob":        fav_prob,
+        "xg_ok":           xg_ok,
+        "diff":            diff,
+        "mins_since_goal": inc_data["mins_since_goal"],
+        "h_red":           inc_data["h_red"],
+        "a_red":           inc_data["a_red"],
+        "in_2h":           in_2h,
     }
 
 
 def get_threshold(a, diff, minute):
-    # Seuil eleve par defaut = uniquement alertes max
     base = 62
 
-    # Fenetre privilegiee 60-88min : seuil reduit = plus sensible
-    if minute >= 60:
-        base -= 14
-    elif minute >= 50:
-        base -= 5
+    # Fenetre privilegiee 60-88min
+    if minute >= 60:     base -= 14
+    elif minute >= 50:   base -= 5
 
     # Score serre
-    if diff == 0:   base -= 8
-    elif diff == 1: base -= 5
-    elif diff == 2: base += 8
+    if diff == 0:        base -= 8
+    elif diff == 1:      base -= 5
+    elif diff == 2:      base += 8
 
-    # Boost ML
+    # ML
     if a["rec_over25"]:                       base -= 4
     if a["p_over25"] >= 75:                   base -= 3
     if a["xg_ok"] and a["total_xg"] >= 1.5:  base -= 4
 
-    # Pression montante = signal fort
+    # Pression montante
     if a["pressure_rising"]:                  base -= 6
 
-    return max(35, min(base, 72))
+    # Carton rouge = plus de danger
+    if a["h_red"] > 0 or a["a_red"] > 0:     base -= 5
+
+    # Longtemps sans but
+    if a["mins_since_goal"] is not None and a["mins_since_goal"] >= 25:
+        base -= 4
+
+    return max(32, min(base, 72))
 
 
 def build_alert(match, a, threshold):
@@ -431,18 +517,8 @@ def build_alert(match, a, threshold):
     danger  = a["danger"]
     total_g = hg + ag
 
-    margin = danger - threshold
-    if margin >= 15 or danger >= 78:
-        emj = "🔴🔴"
-        lvl = "ALERTE MAX"
-    elif margin >= 7 or danger >= 63:
-        emj = "🟠"
-        lvl = "FORTE PRESSION"
-    else:
-        emj = "🟡"
-        lvl = "PRESSION"
-
-    rising_str = " 📈 PRESSION EN HAUSSE" if a["pressure_rising"] else ""
+    # Toujours ALERTE MAX
+    rising_str = " | PRESSION EN HAUSSE 📈" if a["pressure_rising"] else ""
 
     son_str = str(int(a["h_son"])) + "/" + str(int(a["a_son"])) + " tirs cadres"
     cor_str = str(int(a["h_cor"])) + "/" + str(int(a["a_cor"])) + " corners"
@@ -450,28 +526,47 @@ def build_alert(match, a, threshold):
     if a["xg_ok"]:
         xg_str = " | xG " + str(round(a["h_xg"], 1)) + "/" + str(round(a["a_xg"], 1))
 
+    # Equipe la plus dangereuse
     if a["likely_scorer"] == "home":
         scorer_str = "Favori: " + h_name
-        if a["likely_xg"] >= 1.0:
+        if a["a_red"] > 0:
+            scorer_str += " (" + a_name[:10] + " a 10)"
+        elif a["likely_xg"] >= 1.0:
             scorer_str += " (xG " + str(round(a["likely_xg"], 1)) + ")"
     elif a["likely_scorer"] == "away":
         scorer_str = "Favori: " + a_name
-        if a["likely_xg"] >= 1.0:
+        if a["h_red"] > 0:
+            scorer_str += " (" + h_name[:10] + " a 10)"
+        elif a["likely_xg"] >= 1.0:
             scorer_str += " (xG " + str(round(a["likely_xg"], 1)) + ")"
     else:
         scorer_str = "Match ouvert - but des deux cotes"
 
+    # Temps sans but
+    goal_str = ""
+    if a["mins_since_goal"] is not None and a["mins_since_goal"] >= 20:
+        goal_str = " | " + str(a["mins_since_goal"]) + "min sans but"
+
+    # Paris selon contexte
     bets = []
     if a["rec_over25"] or a["p_over25"] >= 65:
         bets.append("Over " + str(total_g) + ".5 (" + str(int(a["p_over25"])) + "%)")
     if a["rec_btts"] or a["p_btts"] >= 62:
         bets.append("BTTS (" + str(int(a["p_btts"])) + "%)")
-    bets.append("Next goal " + ("MT1" if minute < 43 else "MT2"))
+    if a["favorite"] in ("H", "A") and a["rec_fav"]:
+        fn = h_name if a["favorite"] == "H" else a_name
+        bets.append(fn[:12] + " gagne (" + str(int(a["fav_prob"])) + "%)")
+    if hg == ag:
+        bets.append("Prochain but dans le match")
+    elif hg > ag:
+        bets.append(h_name[:12] + " tient ou " + a_name[:12] + " egalise")
+    else:
+        bets.append(a_name[:12] + " tient ou " + h_name[:12] + " egalise")
 
     lines = [
-        emj + " " + lvl + " - " + league + rising_str,
+        "🔴🔴 ALERTE MAX - " + league + rising_str,
         h_name + " " + str(hg) + "-" + str(ag) + " " + a_name + " | " + str(minute) + "min",
-        "⚽ But imminent | " + scorer_str,
+        "⚽ But imminent | " + scorer_str + goal_str,
         "📊 " + son_str + " | " + cor_str + xg_str,
         "💡 " + " | ".join(bets),
     ]
@@ -484,23 +579,17 @@ def check_halftime_alert(match, a, minute):
     """
     if a is None:
         return None
-
     hg, ag = get_score(match)
     if hg != 0 or ag != 0:
         return None
-
-    # Uniquement autour de la 33eme minute
     if not (31 <= minute <= 35):
         return None
-
-    # Pression minimale requise
     if a["total_son"] < 2 or a["total_cor"] < 3:
         return None
 
     h_name = str(match.get("home_team", "Dom"))
     a_name = str(match.get("away_team", "Ext"))
     league = str(match.get("league", {}).get("name", "?"))
-
     xg_str = ""
     if a["xg_ok"] and a["total_xg"] > 0.3:
         xg_str = " | xG " + str(round(a["total_xg"], 1))
@@ -546,18 +635,19 @@ async def run_forever():
                         a_name   = str(match.get("away_team", "?"))
                         diff     = abs(hg - ag)
 
+                        if minute > 88:
+                            continue
+
                         pred = get_prediction(event_id)
                         a    = analyse(match, pred, event_id)
 
                         if a is None:
                             print("  [skip] " + h_name[:10] + " vs " + a_name[:10]
-                                  + " [" + str(minute) + "'] match ferme", flush=True)
+                                  + " [" + str(minute) + "']", flush=True)
                             continue
 
                         danger    = a["danger"]
                         threshold = get_threshold(a, diff, minute)
-                        info      = a["match_alerts"] if "match_alerts" in a else match_alerts.get(event_id, {})
-                        alert_info = match_alerts.get(event_id, {"count": 0, "last_minute": 0})
 
                         print("  [" + str(minute) + "'] "
                               + h_name[:10] + " " + str(hg) + "-" + str(ag) + " " + a_name[:10]
@@ -565,10 +655,11 @@ async def run_forever():
                               + " rising=" + str(a["pressure_rising"])
                               + " son=" + str(int(a["total_son"]))
                               + " cor=" + str(int(a["total_cor"]))
-                              + " xg=" + str(round(a["total_xg"], 1)),
+                              + " xg=" + str(round(a["total_xg"], 1))
+                              + (" RED!" if a["h_red"] + a["a_red"] > 0 else ""),
                               flush=True)
 
-                        # === ALERTE MI-TEMPS 33eme (1 seule par match) ===
+                        # Alerte 33eme 0-0
                         ht_key = event_id + "_ht"
                         if ht_key not in ht_alerts_sent:
                             ht_msg = check_halftime_alert(match, a, minute)
@@ -581,34 +672,22 @@ async def run_forever():
                                 print("  >>> ALERTE 33EME: " + h_name + " vs " + a_name, flush=True)
                                 await asyncio.sleep(1)
 
-                        # === ALERTE PRINCIPALE ===
-                        # Conditions :
-                        # 1. Danger >= seuil
-                        # 2. Max 2 alertes par match
-                        # 3. Cooldown 20 minutes depuis derniere alerte
-                        # 4. Pas apres la 88eme
-
-                        if minute > 88:
-                            continue
-
+                        # Alerte principale MAX
+                        alert_info  = match_alerts.get(event_id, {"count": 0, "last_minute": 0})
                         count       = alert_info["count"]
                         last_minute = alert_info["last_minute"]
 
                         if count >= 2:
                             continue
-
                         if count > 0 and (minute - last_minute) < 20:
-                            print("  [cooldown] " + str(minute - last_minute) + "min depuis derniere alerte", flush=True)
+                            print("  [cooldown] " + str(minute - last_minute) + "min", flush=True)
                             continue
 
                         margin = danger - threshold
-                        is_max_alert = (margin >= 15 or danger >= 78)
+                        is_max = (margin >= 15 or danger >= 78)
 
-                        if danger >= threshold and is_max_alert:
-                            match_alerts[event_id] = {
-                                "count":       count + 1,
-                                "last_minute": minute,
-                            }
+                        if danger >= threshold and is_max:
+                            match_alerts[event_id] = {"count": count + 1, "last_minute": minute}
                             msg = build_alert(match, a, threshold)
                             await bot.send_message(
                                 chat_id=str(TELEGRAM_CHAT_ID),
@@ -619,29 +698,16 @@ async def run_forever():
                                   + " [" + str(minute) + "'] danger=" + str(danger),
                                   flush=True)
                             await asyncio.sleep(1)
-                        elif danger >= threshold:
-                            print("  [sous-seuil max] danger=" + str(danger)
-                                  + " threshold=" + str(threshold)
-                                  + " margin=" + str(margin) + " - pas envoye",
-                                  flush=True)
 
                     except Exception as e:
                         print("  ERREUR match: " + str(e), flush=True)
                         traceback.print_exc()
 
             # Nettoyage memoire
-            if len(ht_alerts_sent) > 200:
-                for k in list(ht_alerts_sent.keys())[:100]:
-                    del ht_alerts_sent[k]
-            if len(match_alerts) > 200:
-                for k in list(match_alerts.keys())[:100]:
-                    del match_alerts[k]
-            if len(pred_cache) > 200:
-                for k in list(pred_cache.keys())[:100]:
-                    del pred_cache[k]
-            if len(prev_stats) > 200:
-                for k in list(prev_stats.keys())[:100]:
-                    del prev_stats[k]
+            for cache in [ht_alerts_sent, match_alerts, pred_cache, stats_history]:
+                if len(cache) > 300:
+                    for k in list(cache.keys())[:150]:
+                        del cache[k]
 
         except Exception as e:
             print("ERREUR BOUCLE: " + str(e), flush=True)
@@ -659,5 +725,5 @@ if __name__ == "__main__":
     if missing:
         print("VARIABLES MANQUANTES: " + ", ".join(missing), flush=True)
         exit(1)
-    print("Config OK", flush=True)
+    print("Config OK | " + str(len(WATCHED_LEAGUES)) + " ligues", flush=True)
     asyncio.run(run_forever())
